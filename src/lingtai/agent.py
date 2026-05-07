@@ -1116,7 +1116,7 @@ class Agent(BaseAgent):
         # Resolution precedence:
         #   1. data["substrate"]          — inline init.json string
         #   2. system/substrate.md        — agent's own copy (editable)
-        #   3. packaged prompts/substrate.md — kernel default (TBD placeholder)
+        #   3. packaged prompts/substrate.md — kernel default (v1)
         #
         # Every agent gets the section populated by default. To opt out,
         # set `"substrate": " "` (a single space, written to system/

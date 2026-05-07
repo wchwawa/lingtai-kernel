@@ -15,9 +15,8 @@ companion to the schemas above it: tool schemas carry mechanical
 reference (parameter names, types, one-line action descriptions),
 substrate carries the operational wisdom (tool tiers, data-flow
 topology, life states, channel discipline, attention model — patterns
-that span multiple tools). See lingtai issue #39. The kernel ships a
-packaged `lingtai/prompts/substrate.md` placeholder so the slot is
-always populated; the `Agent` subclass copies it to
+that span multiple tools). The kernel ships `lingtai/prompts/substrate.md`
+as the packaged default (v1); the `Agent` subclass copies it to
 `system/substrate.md` on first boot, where the agent (or human) can
 edit it freely.
 
