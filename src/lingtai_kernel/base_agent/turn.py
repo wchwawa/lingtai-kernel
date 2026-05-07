@@ -321,10 +321,14 @@ def _run_loop(agent) -> None:
                     err_desc = str(e) or repr(e)
                     aed_attempts += 1
 
-                    # Close any dangling tool_calls with synthetic error tool_results
+                    # Close any dangling tool_calls with synthetic error
+                    # tool_results.  tool_completed=True because AED fires
+                    # after the tool executor already ran — the real failure
+                    # is the LLM continuation, not the tool itself.
                     if agent._session.chat is not None:
                         agent._session.chat.interface.close_pending_tool_calls(
-                            reason=err_desc or "aed_recovery"
+                            reason=err_desc or "aed_recovery",
+                            tool_completed=True,
                         )
 
                     agent._set_state(AgentState.STUCK, reason=f"AED attempt {aed_attempts}: {err_desc}")
@@ -668,8 +672,12 @@ def _handle_tc_wake(agent, msg: Message) -> None:
             _process_response(agent, response, ledger_source="tc_wake")
         except Exception as splice_err:
             if iface.has_pending_tool_calls():
+                # tool_completed=True: the tool result was produced by the
+                # notification system and passed in as item.result — the
+                # failure is in the LLM round-trip that followed.
                 iface.close_pending_tool_calls(
                     reason=f"tc_wake splice failed: {str(splice_err)[:200]}",
+                    tool_completed=True,
                 )
                 agent._save_chat_history()
             agent._log(
@@ -713,8 +721,13 @@ def _handle_tc_wake(agent, msg: Message) -> None:
         _process_response(agent, response, ledger_source="tc_wake")
     except Exception as e:
         if iface.has_pending_tool_calls():
+            # tool_completed=True: the wire-drive path only fires when the
+            # tail is already user[ToolResultBlock] — the tool results
+            # were committed and the adapter reverted them after the
+            # LLM continuation failed.
             iface.close_pending_tool_calls(
                 reason=f"tc_wake continue heal: {str(e)[:200]}",
+                tool_completed=True,
             )
             agent._save_chat_history()
         agent._log("tc_wake_error", error=str(e)[:300])

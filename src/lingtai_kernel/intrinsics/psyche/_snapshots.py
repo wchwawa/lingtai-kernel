@@ -109,11 +109,16 @@ def _close_orphan_tool_calls(iface) -> int:
     if not unanswered:
         return 0
 
+    from ...llm.interface import _synthesized_abort_message
+
     refusal_blocks = [
         ToolResultBlock(
             id=tc.id,
             name=tc.name,
-            content="[synthesized] tool call did not complete before molt — no result was produced.",
+            content=_synthesized_abort_message(
+                tc.name,
+                "tool call was pending when the session ended (molt/reset)",
+            ),
             synthesized=True,
         )
         for tc in unanswered

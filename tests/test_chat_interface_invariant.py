@@ -117,6 +117,34 @@ class TestClosePendingToolCalls:
         assert result_B.synthesized is True
         assert "tool2" in result_B.content
 
+    def test_synthesizes_results_for_pending_with_tool_completed(self):
+        """When tool_completed=True, the message honestly says the tool
+        already executed and the LLM continuation failed, instead of
+        implying the tool itself did not complete."""
+        iface = ChatInterface()
+        iface.add_system("prompt")
+        iface.add_user_message("go")
+        iface.add_assistant_message(
+            [
+                ToolCallBlock(id="call_A", name="email", args={}),
+            ],
+        )
+        iface.close_pending_tool_calls(
+            "provider overload", tool_completed=True,
+        )
+        assert iface.has_pending_tool_calls() is False
+        tail = iface.entries[-1]
+        result = tail.content[0]
+        assert isinstance(result, ToolResultBlock)
+        assert result.synthesized is True
+        # The message should say the tool completed, not that it didn't.
+        assert "completed" in result.content
+        assert "continuation failed" in result.content
+        assert "email" in result.content
+        assert "provider overload" in result.content
+        # It must NOT say "did not complete" when the tool completed.
+        assert "did not complete" not in result.content
+
     def test_idempotent(self):
         iface = _iface_with_pending_tool_calls()
         iface.close_pending_tool_calls("r1")
