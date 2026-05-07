@@ -63,7 +63,12 @@ class ToolResultBlock:
         return {"type": "tool_result", "id": self.id, "name": self.name, "content": self.content}
 
 
-def _synthesized_abort_message(tool_name: str, reason: str) -> str:
+def _synthesized_abort_message(
+    tool_name: str,
+    reason: str,
+    *,
+    tool_completed: bool = False,
+) -> str:
     """Content for a heal-path placeholder ToolResultBlock.
 
     Written FOR THE AGENT to read on the next turn — not for log-readers.
@@ -73,15 +78,36 @@ def _synthesized_abort_message(tool_name: str, reason: str) -> str:
     the side effect committed but before the result returned), (3) actionable
     guidance to verify state before retrying. Tone matches the kernel's
     other system-injected notices the agent already knows how to read.
+
+    When ``tool_completed`` is True, the caller knows the tool already
+    executed and the real failure was the LLM continuation *after* the
+    tool result.  In that case the message says so honestly instead of
+    implying the tool itself failed.
     """
+    if tool_completed:
+        return (
+            f"[kernel notice — tool call completed but LLM continuation failed]\n"
+            f"\n"
+            f"A prior call to `{tool_name}` already executed, but the LLM "
+            f"continuation after the tool result failed. The adapter reverted "
+            f"the committed result from the conversation so the interface "
+            f"could recover.\n"
+            f"\n"
+            f"**Do not blindly retry the tool.** Its side effect (file write, "
+            f"email send, mail reply, state change, daemon spawn, etc.) very "
+            f"likely took effect. Check the actual state before deciding — "
+            f"read the file, check the inbox, list the daemon, etc. "
+            f"If the side effect is confirmed, continue from where you "
+            f"left off without re-executing the tool.\n"
+            f"\n"
+            f"Reason recorded by the kernel: {reason}"
+        )
     return (
         f"[kernel notice — tool call did not complete]\n"
         f"\n"
-        f"Your prior turn emitted a call to `{tool_name}`, but the kernel's "
-        f"pre-send health check found this call still unanswered when it "
-        f"was about to dispatch the next message. The tool execution either "
-        f"timed out, errored, or was interrupted before its result could be "
-        f"committed to the conversation.\n"
+        f"A prior call to `{tool_name}` was left without a result. The tool "
+        f"execution may have timed out, errored, or been interrupted before "
+        f"its result could be committed to the conversation.\n"
         f"\n"
         f"**Important:** the side effect of `{tool_name}` MAY OR MAY NOT have "
         f"happened. The kernel cannot tell. Do not assume the action took "
@@ -341,7 +367,9 @@ class ChatInterface:
             return False
         return any(isinstance(b, ToolCallBlock) for b in last.content)
 
-    def close_pending_tool_calls(self, reason: str) -> None:
+    def close_pending_tool_calls(
+        self, reason: str, *, tool_completed: bool = False,
+    ) -> None:
         """Synthesize placeholder ToolResultBlocks for any unanswered tool_calls
         on the tail assistant entry. No-op if the tail has no pending calls.
 
@@ -349,6 +377,13 @@ class ChatInterface:
         process — to bring the interface into a valid state before appending
         a new user entry. Each placeholder carries the reason string so the
         model has context on the next turn.
+
+        When ``tool_completed`` is True, the caller knows the tool already
+        executed successfully and the real failure was the LLM continuation
+        after the result was produced (e.g. provider timeout / overload
+        during the post-tool-continuation round-trip).  The synthesized
+        message will say so honestly, guiding the agent to verify side
+        effects rather than blindly retrying.
 
         Idempotent: after one call, has_pending_tool_calls() returns False,
         and a second call no-ops.
@@ -361,7 +396,9 @@ class ChatInterface:
             ToolResultBlock(
                 id=b.id,
                 name=b.name,
-                content=_synthesized_abort_message(b.name, reason),
+                content=_synthesized_abort_message(
+                    b.name, reason, tool_completed=tool_completed,
+                ),
                 synthesized=True,
             )
             for b in pending
