@@ -498,12 +498,11 @@ def _handle_request(agent, msg: Message) -> None:
 
     # Molt pressure — warn agent when context is getting full.
     #
-    # Hard ceiling is two-phase: first hit publishes a critical
-    # notification (same channel as graduated warnings) so the agent
-    # gets one turn to molt voluntarily; subsequent hits force-wipe.
-    # The forced-wipe path prepends its notice to the current user
-    # message because it is a kernel ACTION the agent must see this
-    # turn (the wipe already happened).
+    # Hard ceiling (>= 95%): publishes a critical notification on every
+    # hit.  No force-wipe — if the agent ignores the warning, the LLM
+    # call will overflow and the adapter-level recovery
+    # (ChatSession._run_with_overflow_recovery) will trim the oldest
+    # entries and retry.
     #
     # Graduated warnings (level 1/2/3 below the hard ceiling) are routed
     # through the .notification/molt.json channel instead of being baked
