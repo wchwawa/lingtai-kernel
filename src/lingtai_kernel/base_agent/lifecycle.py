@@ -180,6 +180,12 @@ def _heartbeat_loop(agent) -> None:
             # .llm_hang clear, save chat history, spawn watcher process,
             # and deferred relaunch.
             _perform_refresh(agent)
+            # Signal shutdown so the heartbeat loop exits and the watcher
+            # can detect the lock release.  Without this, the heartbeat
+            # fires again next second, finds the .refresh that
+            # _perform_refresh wrote, and spawns another watcher — ad
+            # infinitum until the 60-second watcher timeout.
+            agent._shutdown.set()
 
         # .suspend = SUSPENDED (full process death, external only)
         suspend_file = agent._working_dir / ".suspend"
