@@ -19,10 +19,10 @@ import time
 def _start_soul_timer(agent) -> None:
     """Start the soul cadence timer.
 
-    Runs only while the agent is fire-eligible (ACTIVE or IDLE).
-    Cancelled by _set_state on entry to STUCK / ASLEEP / SUSPENDED;
-    restarted by _set_state on return to ACTIVE / IDLE. Reschedules
-    itself in the timer callback (also gated on fire-eligibility).
+    Runs only while the agent is IDLE.  Cancelled by _set_state on
+    entry to any non-IDLE state (ACTIVE, STUCK, ASLEEP, SUSPENDED).
+    Started by _set_state on transition to IDLE.  Does NOT reschedule
+    itself after firing — the next IDLE transition starts a fresh timer.
     """
     import threading
 
@@ -43,12 +43,12 @@ def _cancel_soul_timer(agent) -> None:
 
 
 def _soul_whisper(agent) -> None:
-    """Cadence timer callback. Fires past-self consultation on the
-    soul_delay wall clock, then reschedules itself.
+    """Cadence timer callback. Fires past-self consultation once.
 
-    Only fires under ACTIVE or IDLE. The timer is normally cancelled
-    on entry to STUCK/ASLEEP/SUSPENDED via _set_state, so the state
-    check here is defensive.
+    Only fires while IDLE.  Does NOT reschedule — the next IDLE
+    transition in _set_state starts a fresh timer.  This ensures the
+    delay is measured from the moment the agent goes idle, not from
+    the last fire.
 
     Issue #47: Also checks for pending notifications before running
     consultation. This ensures messages are seen within one soul delay
@@ -59,7 +59,7 @@ def _soul_whisper(agent) -> None:
 
     agent._soul_timer = None
     try:
-        if agent._state in (AgentState.ACTIVE, AgentState.IDLE):
+        if agent._state == AgentState.IDLE:
             # Issue #47: Check for pending notifications before consultation
             # This ensures messages are seen within one soul delay cycle
             try:
@@ -81,9 +81,9 @@ def _soul_whisper(agent) -> None:
             agent._log("soul_whisper_skipped", reason=agent._state.value)
     except Exception as e:
         agent._log("soul_whisper_error", error=str(e))
-    finally:
-        if agent._state in (AgentState.ACTIVE, AgentState.IDLE):
-            agent._start_soul_timer()
+    # No rescheduling — the next IDLE transition in _set_state will
+    # start a fresh timer.  This ensures the delay is measured from
+    # the moment the agent goes idle, not from the last fire.
 
 
 def _persist_soul_entry(agent, result: dict, mode: str = "flow", source: str = "agent") -> None:
@@ -145,10 +145,17 @@ def _flatten_v3_for_pair(agent, voice: dict) -> dict:
 
 
 def _soul_fire_allowed(agent) -> bool:
-    """True when soul-flow may inject results into the live agent."""
-    from ...state import AgentState
+    """True when soul-flow may inject results into the live agent.
 
-    return agent._state in (AgentState.ACTIVE, AgentState.IDLE)
+    Soul flow only fires while IDLE — not during ACTIVE work.
+
+    Compares by string value (``agent._state.value == "idle"``) rather
+    than enum identity to guard against stale-enum-mismatch scenarios
+    (e.g. installed package AgentState vs hot-reloaded runtime copy).
+    """
+    state = agent._state
+    state_val = state.value if hasattr(state, "value") else str(state)
+    return state_val == "idle"
 
 
 def _shape_soul_voices(voices_for_pair: list[dict]) -> list[dict]:
@@ -187,8 +194,12 @@ def _run_consultation_fire(agent) -> None:
     import secrets as _secrets
     from ...message import _make_message, MSG_TC_WAKE
 
+    state = agent._state
+    state_val = state.value if hasattr(state, "value") else str(state)
+    agent._log("soul_fire_gate_check", state=state_val,
+               state_type=type(state).__qualname__)
     if not _soul_fire_allowed(agent):
-        agent._log("consultation_skipped_state", state=agent._state.value)
+        agent._log("consultation_skipped_state", state=state_val)
         return
 
     lock = getattr(agent, "_soul_fire_lock", None)
@@ -209,11 +220,6 @@ def _run_consultation_fire(agent) -> None:
 
         diary = _render_current_diary(agent)
         voices = _run_consultation_batch(agent)
-
-        if not _soul_fire_allowed(agent):
-            agent._log("consultation_discarded_state",
-                       fire_id=fire_id, state=agent._state.value)
-            return
 
         sources = [v.get("source", "unknown") for v in voices]
         outcome = "ok" if voices else "empty"

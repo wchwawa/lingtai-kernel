@@ -388,6 +388,11 @@ class BaseAgent:
         # while the agent is mid-tool-chain; consumed (and reset to None)
         # by _inject_notification_meta inside SessionManager.send().
         self._pending_notification_meta: str | None = None
+        self._pending_notification_fp: str | None = None
+        # Per-turn flag: prevents _check_molt_pressure from incrementing
+        # _compaction_warnings more than once per turn. Reset at turn
+        # boundaries in _handle_request / _handle_tc_wake.
+        self._molt_warning_counted: bool = False
 
         # Lifecycle
         self._shutdown = threading.Event()
@@ -552,10 +557,11 @@ class BaseAgent:
     def _set_state(self, new_state: AgentState, reason: str = "") -> None:
         """Transition to a new state.
 
-        Drives the soul cadence timer: the timer runs only when the agent
-        is in a fire-eligible state (ACTIVE / IDLE). Entering STUCK,
-        ASLEEP, or SUSPENDED cancels it outright; returning to ACTIVE or
-        IDLE starts a fresh ``soul_delay``-second timer.
+        Drives the soul cadence timer: the timer runs only while the
+        agent is IDLE.  Entering IDLE starts a fresh ``soul_delay``-second
+        timer; leaving IDLE (to ACTIVE, STUCK, ASLEEP, or SUSPENDED)
+        cancels it.  The timer does NOT reschedule itself after firing —
+        the next IDLE transition starts a fresh countdown.
         """
         from ..intrinsics.soul.flow import _start_soul_timer, _cancel_soul_timer
 
@@ -568,13 +574,11 @@ class BaseAgent:
         else:
             self._idle.set()
 
-        fire_eligible = {AgentState.ACTIVE, AgentState.IDLE}
-        was_eligible = old in fire_eligible
-        is_eligible = new_state in fire_eligible
-        if was_eligible and not is_eligible:
-            _cancel_soul_timer(self)
-        elif is_eligible and not was_eligible:
+        # Soul timer: IDLE-only.  Start on entering IDLE, cancel on leaving.
+        if new_state == AgentState.IDLE:
             _start_soul_timer(self)
+        elif old == AgentState.IDLE:
+            _cancel_soul_timer(self)
 
         self._log("agent_state", old=old.value, new=new_state.value, reason=reason)
         self._workdir.write_manifest(self._build_manifest())
@@ -912,11 +916,15 @@ class BaseAgent:
             # Stash for injection at request-send time (meta on latest
             # ToolResultBlock).  Same envelope shape as IDLE pair so the
             # agent sees one signal regardless of delivery path.
+            # Do NOT set inject_ok — fingerprint is committed only when
+            # _inject_notification_meta() actually delivers the stash,
+            # preventing a pressure-drop clear from silently dropping
+            # the warning before delivery.
             body = {"_synthesized": True, "notifications": notifications}
             self._pending_notification_meta = json.dumps(
                 body, indent=2, ensure_ascii=False
             )
-            inject_ok = True
+            self._pending_notification_fp = fp
             self._log(
                 "notification_stashed_active",
                 sources=list(notifications.keys()),
@@ -926,9 +934,11 @@ class BaseAgent:
         # observed; we just can't act on it until state recovers.
 
         # --- Commit fingerprint only if injection succeeded ---
-        if inject_ok or self._state not in (
-            AgentState.IDLE, AgentState.ASLEEP
-        ):
+        # ACTIVE defers FP commit to _inject_notification_meta(); only
+        # STUCK/SUSPENDED commit here (they can't inject at all).
+        if inject_ok:
+            self._notification_fp = fp
+        elif self._state in (AgentState.STUCK, AgentState.SUSPENDED):
             self._notification_fp = fp
 
     def _heal_pending_tool_calls(self, *, reason: str) -> bool:
@@ -1032,8 +1042,8 @@ class BaseAgent:
         # uniquely even when the notification payload repeats. The monotonic
         # injection_seq is added on top to guarantee novelty within the same
         # second (heal+retry tight loops, time-blind agents).
-        # Defensive try/except + getattr cover test doubles that bypass
-        # __init__ and don't carry the full agent attribute surface.
+        # Defensive getattr covers test doubles that bypass __init__ and
+        # don't carry the full agent attribute surface.
         self._notification_inject_seq = getattr(self, "_notification_inject_seq", 0) + 1
         try:
             meta = build_meta(self)
@@ -1106,18 +1116,15 @@ class BaseAgent:
         return True
 
     def _inject_notification_meta(self, message):
-        """ACTIVE-state: prepend notification JSON to a recent str ToolResultBlock.
+        """ACTIVE-state: prepend notification JSON to a recent ToolResultBlock.
 
         Called from ``SessionManager.send()`` before the API call.  Walks
-        the wire backwards looking for a ``ToolResultBlock`` whose
-        ``.content`` is a string (dict-content blocks come from MCP
-        structured results — those are skipped to avoid corrupting their
-        schema).  Prepends the
-        ``notifications:\\n<json>\\n\\n`` prefix to the most recent
-        string-content result, stripping any stale prefix from older
-        results.
+        the wire backwards looking for the most recent ``ToolResultBlock``.
+        Dict-content blocks are serialized to JSON before prepending.
+        Prepends the ``notifications:\\n<json>\\n\\n`` prefix to the
+        target result, stripping any stale prefix from older results.
 
-        If no string-content ``ToolResultBlock`` exists, leaves
+        If no ``ToolResultBlock`` exists at all, leaves
         ``_pending_notification_meta`` set and the next ``send()``
         retries.
 
@@ -1136,17 +1143,14 @@ class BaseAgent:
         )
 
         # Walk backwards to find the most recent user entry whose content
-        # contains a *string-content* ToolResultBlock.
+        # contains a ToolResultBlock (str or dict content).
         target_entry = None
         target_block = None
         for entry in reversed(iface.entries):
             if entry.role != "user":
                 continue
             for block in entry.content:
-                if (
-                    isinstance(block, ToolResultBlock)
-                    and isinstance(block.content, str)
-                ):
+                if isinstance(block, ToolResultBlock):
                     target_entry = entry
                     target_block = block
                     break
@@ -1154,14 +1158,35 @@ class BaseAgent:
                 break
 
         if target_block is None:
-            # All recent results are dict-typed (or there are none).
-            # Keep the pending meta; the next send() with a string
-            # result will carry it.
+            # No ToolResultBlock to prepend to.  Fall back to pair
+            # injection (same path as IDLE) so the warning isn't stuck
+            # in _pending_notification_meta indefinitely.
             self._log(
-                "notification_meta_deferred",
-                reason="no_str_tool_result",
+                "notification_meta_fallback_to_pair",
+                reason="no_tool_result",
             )
+            injected = False
+            try:
+                body = json.loads(self._pending_notification_meta)
+                notifications = body.get("notifications", {})
+                if notifications:
+                    injected = self._inject_notification_pair(notifications)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if injected:
+                self._pending_notification_meta = None
+                # Commit the fingerprint now that delivery succeeded.
+                if self._pending_notification_fp is not None:
+                    self._notification_fp = self._pending_notification_fp
+                    self._pending_notification_fp = None
+            # If not injected, leave pending state for next send() retry.
             return message
+
+        # If the target block has dict content, serialize to JSON string.
+        if isinstance(target_block.content, dict):
+            target_block.content = json.dumps(
+                target_block.content, ensure_ascii=False
+            )
 
         # Strip notification prefix from ALL OTHER user ToolResultBlocks.
         for entry in iface.entries:
@@ -1180,6 +1205,10 @@ class BaseAgent:
         target_block.content = notif_prefix + cleaned
 
         self._pending_notification_meta = None
+        # Commit the fingerprint now that delivery succeeded.
+        if self._pending_notification_fp is not None:
+            self._notification_fp = self._pending_notification_fp
+            self._pending_notification_fp = None
         self._log(
             "notification_meta_injected",
             entry_id=target_entry.id,

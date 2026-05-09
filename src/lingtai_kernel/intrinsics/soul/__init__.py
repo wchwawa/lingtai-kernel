@@ -84,7 +84,7 @@ def get_schema(lang: str = "en") -> dict:
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["inquiry", "flow", "config", "voice"],
+                "enum": ["inquiry", "flow", "config", "voice", "dismiss"],
                 "description": t(lang, "soul.action_description"),
             },
             "inquiry": {
@@ -143,6 +143,20 @@ def handle(agent, args: dict) -> dict:
 
         def _fire():
             try:
+                # Wait for IDLE before firing — voluntary flow is triggered
+                # while ACTIVE (inside a tool call), but _run_consultation_fire
+                # gates on IDLE.  _idle is a threading.Event set on every
+                # non-ACTIVE transition (see base_agent._set_state).
+                idle_event = getattr(agent, "_idle", None)
+                if idle_event is not None:
+                    agent._log("soul_flow_voluntary_waiting_idle")
+                    # Wait up to soul_delay seconds; if the agent never goes
+                    # IDLE (stuck in ACTIVE), give up rather than hang.
+                    timeout = getattr(agent, "_soul_delay", 300.0)
+                    if not idle_event.wait(timeout=timeout):
+                        agent._log("soul_flow_voluntary_timeout",
+                                   timeout=timeout)
+                        return
                 _run_consultation_fire(agent)
             except Exception as e:
                 try:
@@ -185,9 +199,15 @@ def handle(agent, args: dict) -> dict:
     if action == "voice":
         return _handle_voice(agent, args)
 
+    if action == "dismiss":
+        from ...notifications import clear as clear_notification
+        clear_notification(agent._working_dir, "soul")
+        agent._log("soul_dismiss")
+        return {"status": "ok", "message": "Soul flow notification dismissed."}
+
     return {
         "error": (
-            f"Unknown soul action: {action}. Use inquiry, config, voice, "
+            f"Unknown soul action: {action}. Use inquiry, config, voice, dismiss, "
             "or wait for flow (mechanical)."
         )
     }

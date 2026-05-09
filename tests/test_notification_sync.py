@@ -405,14 +405,15 @@ def test_submit_via_system_alias(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_molt_clears_notification_dir(tmp_path: Path) -> None:
-    """After molt, the .notification/ dir is gone and the agent's
-    fingerprint state is reset."""
+def test_molt_preserves_notification_dir(tmp_path: Path) -> None:
+    """After molt, the .notification/ dir and its files survive — they are
+    system state, not conversation memory.  In-memory tracking is reset
+    (block_id, pending_meta) but the on-disk files and fingerprint persist."""
     publish(tmp_path, "email", {"count": 3})
     publish(tmp_path, "soul", {"voices": []})
     assert (tmp_path / ".notification").is_dir()
 
-    # Stub agent with the bare minimum the molt clear logic needs.
+    # Stub agent with the bare minimum the molt reset logic needs.
     @dataclass
     class _MoltStub:
         _working_dir: Path = tmp_path
@@ -421,20 +422,18 @@ def test_molt_clears_notification_dir(tmp_path: Path) -> None:
         _pending_notification_meta: str | None = "stale"
         _appendix_ids_by_source: dict = field(default_factory=dict)
 
-    # We exercise the rmtree+reset block directly, since the rest of
-    # _context_molt builds a session and runs hooks we don't care
-    # about for this test.
     agent = _MoltStub()
-    import shutil
-    notif_dir = agent._working_dir / ".notification"
-    if notif_dir.is_dir():
-        shutil.rmtree(notif_dir)
-    agent._notification_fp = ()
+    # Only reset in-memory tracking; notification files survive molt.
     agent._notification_block_id = None
     agent._pending_notification_meta = None
 
-    assert not (tmp_path / ".notification").exists()
-    assert agent._notification_fp == ()
+    # .notification/ directory and files should still exist
+    assert (tmp_path / ".notification").is_dir()
+    assert (tmp_path / ".notification" / "email.json").is_file()
+    assert (tmp_path / ".notification" / "soul.json").is_file()
+    # _notification_fp keeps its value (files still on disk)
+    assert agent._notification_fp == (("email.json", 1, 12),)
+    # Wire-level tracking is reset
     assert agent._notification_block_id is None
     assert agent._pending_notification_meta is None
 
@@ -809,9 +808,9 @@ def test_sync_active_stashes_meta(tmp_path: Path) -> None:
     assert len(agent._chat_stub.interface.entries) == 0
 
 
-def test_inject_notification_meta_skips_dict_content(tmp_path: Path) -> None:
-    """Most recent ToolResultBlock has dict content — meta walks back to
-    the next string-content result."""
+def test_inject_notification_meta_prefers_most_recent_block(tmp_path: Path) -> None:
+    """Most recent ToolResultBlock has dict content — meta is injected
+    there (dict serialized to JSON string), not on the older str block."""
     from lingtai_kernel.base_agent import BaseAgent
     from lingtai_kernel.llm.interface import ToolCallBlock, ToolResultBlock
 
@@ -821,7 +820,7 @@ def test_inject_notification_meta_skips_dict_content(tmp_path: Path) -> None:
     # First pair: string content (older).
     iface.add_assistant_message(content=[ToolCallBlock(id="c1", name="bash", args={})])
     iface.add_tool_results([ToolResultBlock(id="c1", name="bash", content="hello world")])
-    # Second pair: dict content (newer — should be skipped).
+    # Second pair: dict content (newer — should receive the notification).
     iface.add_assistant_message(content=[ToolCallBlock(id="c2", name="mcp", args={})])
     iface.add_tool_results([ToolResultBlock(id="c2", name="mcp", content={"structured": True})])
 
@@ -829,6 +828,7 @@ def test_inject_notification_meta_skips_dict_content(tmp_path: Path) -> None:
         def __init__(self):
             self._chat_stub = chat
             self._pending_notification_meta = '{"_synthesized": true, "notifications": {"email": {}}}'
+            self._pending_notification_fp = None
             self._logs = []
 
         @property
@@ -841,18 +841,71 @@ def test_inject_notification_meta_skips_dict_content(tmp_path: Path) -> None:
     agent = _Agent()
     agent._inject_notification_meta(message=None)
 
-    # Older str-content block now carries the prefix.
+    # Older str-content block is untouched.
     str_block = iface.entries[1].content[0]
-    assert isinstance(str_block.content, str)
-    assert str_block.content.startswith("notifications:\n")
-    assert "hello world" in str_block.content
+    assert str_block.content == "hello world"
 
-    # Newer dict-content block is untouched.
+    # Newer dict-content block was serialized and now carries the prefix.
     dict_block = iface.entries[3].content[0]
-    assert dict_block.content == {"structured": True}
+    assert isinstance(dict_block.content, str)
+    assert dict_block.content.startswith("notifications:\n")
+    assert '"structured": true' in dict_block.content
 
     # Pending meta cleared.
     assert agent._pending_notification_meta is None
+
+
+def test_inject_notification_meta_dict_only(tmp_path: Path) -> None:
+    """When ALL ToolResultBlocks have dict content, the notification is
+    still injected (dict serialized to JSON string) instead of being
+    deferred indefinitely.  Regression test for 79% deferral rate bug."""
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.llm.interface import ToolCallBlock, ToolResultBlock
+
+    chat = _make_chat_stub()
+    iface = chat.interface
+
+    # Only dict-content blocks — the old code would defer here.
+    iface.add_assistant_message(content=[ToolCallBlock(id="c1", name="psyche", args={})])
+    iface.add_tool_results([ToolResultBlock(id="c1", name="psyche", content={"status": "ok", "identity": "test"})])
+    iface.add_assistant_message(content=[ToolCallBlock(id="c2", name="soul", args={})])
+    iface.add_tool_results([ToolResultBlock(id="c2", name="soul", content={"voices": []})])
+
+    class _Agent(BaseAgent):
+        def __init__(self):
+            self._chat_stub = chat
+            self._pending_notification_meta = '{"_synthesized": true, "notifications": {"molt": {"pressure": 0.9}}}'
+            self._pending_notification_fp = None
+            self._logs = []
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+    agent = _Agent()
+    agent._inject_notification_meta(message=None)
+
+    # Most recent block (soul) should carry the notification prefix.
+    target = iface.entries[3].content[0]
+    assert isinstance(target.content, str)
+    assert target.content.startswith("notifications:\n")
+    assert '"voices": []' in target.content
+    assert "molt" in target.content
+
+    # Older dict block untouched (already serialized would only happen
+    # if it had been a previous target — it wasn't, so still dict).
+    older = iface.entries[1].content[0]
+    assert older.content == {"status": "ok", "identity": "test"}
+
+    # Pending meta cleared — not deferred.
+    assert agent._pending_notification_meta is None
+    # Logged as injected, not deferred.
+    events = [e for e, _ in agent._logs]
+    assert "notification_meta_injected" in events
+    assert "notification_meta_deferred" not in events
 
 
 def test_inject_notification_meta_strips_old_prefix(tmp_path: Path) -> None:
@@ -878,6 +931,7 @@ def test_inject_notification_meta_strips_old_prefix(tmp_path: Path) -> None:
         def __init__(self):
             self._chat_stub = chat
             self._pending_notification_meta = '{"_synthesized": true, "notifications": {"email": {}}}'
+            self._pending_notification_fp = None
             self._logs = []
 
         @property
