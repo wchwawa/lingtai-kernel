@@ -397,7 +397,10 @@ def _perform_refresh(agent) -> None:
         return
 
     working_dir = agent._working_dir
-    (working_dir / ".refresh").touch()
+    # Do NOT touch .refresh here — the heartbeat already renamed it to
+    # .refresh.taken before calling us.  Writing a fresh .refresh would
+    # cause the heartbeat (on the tool-call path) to see it on the next
+    # tick and spawn a duplicate watcher.
 
     taken_path = str(working_dir / ".refresh.taken")
     lock_path = str(working_dir / ".agent.lock")
@@ -444,6 +447,14 @@ def _perform_refresh(agent) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    # Clean up .refresh if it exists (tool-call path: the heartbeat
+    # hasn't renamed it yet, so it's still on disk).  Removing it
+    # prevents the heartbeat from seeing it on the next tick and
+    # spawning a duplicate watcher.
+    try:
+        (working_dir / ".refresh").unlink(missing_ok=True)
+    except OSError:
+        pass
     agent._log("refresh_deferred_relaunch", cmd=cmd[0])
 
 
