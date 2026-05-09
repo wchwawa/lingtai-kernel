@@ -40,7 +40,7 @@ description: >
   (see `core/mailbox/ANATOMY.md`), or the LingTai TUI's own cron
   settings. Other bash topics (debugging pipelines, locale handling,
   binary data idioms) will accumulate here as written.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Bash Manual
@@ -190,22 +190,41 @@ Or set `PATH` explicitly at the top of the script. Don't trust the inherited one
 
 Writing to the outbox is the queue, not the doorbell. The agent will see the mail on its next turn cycle. If it's actively in a long-running turn or asleep, the mail waits until the next active turn.
 
-If you need the agent to act on the mail *promptly* (within seconds), follow the mail-drop with a refresh of the agent: touch the agent's `.refresh` file, wait for the lock to release, relaunch. This forces the agent to start a fresh turn that will pick up the queued mail immediately. Refresh preserves chat history.
+If you need the agent to act on the mail *promptly* (within seconds), follow the mail-drop with `touch .refresh` and **stop there**. The kernel's `_perform_refresh` (`base_agent/lifecycle.py:_perform_refresh`) handles the rest: it spawns a deferred-relaunch watcher that waits for `.agent.lock` to release and then `Popen`s the new agent itself. The cron script does not need to wait, does not need to verify, does not need to relaunch.
 
 ```bash
-LIBAI_DIR="$PROJECT_ROOT/.lingtai/libai"
+# Mail-drop already done above (writing message.json under human/mailbox/outbox/<uuid>/).
+# Now nudge the agent to pick it up immediately:
+touch "$PROJECT_ROOT/.lingtai/<agent>/.refresh"
+# Done. Exit. The kernel's refresh watcher handles shutdown + relaunch.
+```
+
+That's the entire refresh recipe. If the human just wants the work done eventually (within the next active turn), even the `touch .refresh` is overhead — drop the mail and exit.
+
+#### Anti-pattern — DO NOT do any of these
+
+The following pattern looks reasonable but causes **duplicate-agent accumulation** (multiple Python interpreters all running against the same workdir, observed in vivo as 6 stacked PIDs after 6 hourly fires):
+
+```bash
+# ❌ DANGEROUS — do not copy this pattern
 touch "$LIBAI_DIR/.refresh"
-# Wait up to 60s for clean shutdown
 WAIT_DEADLINE=$(($(date +%s) + 60))
 while [ -e "$LIBAI_DIR/.agent.lock" ]; do
   [ $(date +%s) -gt $WAIT_DEADLINE ] && rm -f "$LIBAI_DIR/.agent.lock" && break
   sleep 0.5
 done
-rm -f "$LIBAI_DIR/.refresh.taken"
-# Relaunch (see "launchd process-tree reaping" below for why this is non-trivial)
+"$VENV_PYTHON" "$RELAUNCH_SCRIPT" ...   # parallel relaunch
 ```
 
-If the human just wants the work done eventually (within the next active turn), skip the refresh — it's overhead.
+Two failure modes baked in:
+
+1. **Path-existence check on `.agent.lock` is racy.** The kernel uses `fcntl.flock` for mutual exclusion, not the file's mere presence. The lockfile vanishes near the *end* of `_stop()`, but the Python interpreter can linger 30–60s after that doing HTTP teardown, mail-listener stop, and MCP child reaping. Polling for the path to disappear and then spawning a new agent races a still-living process.
+
+2. **`rm -f .agent.lock` on timeout is destructive.** flock is invisible to `rm`; you delete the path while the kernel still considers itself the owner. The new agent then creates a fresh lockfile at the same path and acquires flock on that — so you have two agents, each holding flock on a different inode at the same path. When the old process finishes shutdown and calls its tail-end `unlink(.agent.lock, missing_ok=True)`, it can delete the **new** agent's lockfile.
+
+3. **Parallel relaunch races the kernel's own watcher.** `touch .refresh` already triggers `_perform_refresh`, which spawns a deferred-relaunch process (see `base_agent/lifecycle.py:_perform_refresh`) that does the wait-for-lock-then-spawn dance correctly. Adding your own relaunch in the cron means two processes are racing to be "the new agent." Whichever loses the flock will sit in `acquire_lock(timeout=10)` for 10 seconds and then crash, but during those 10 seconds you have two Python processes visible in `ps`.
+
+**Rule:** if you find yourself parsing `.agent.lock`, polling for it, or removing it from a script, stop. The lock is the kernel's. Touch `.refresh` and exit.
 
 ### 7. No janitors in the cron prompt unless the human asked
 
