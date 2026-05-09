@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -151,8 +152,43 @@ def _install_signal_handlers(working_dir: Path, agent: Agent) -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
+def _check_duplicate_process(working_dir: Path) -> None:
+    """Abort if another `lingtai run <working_dir>` process is already alive.
+
+    Defense-in-depth alongside the kernel's flock — the flock prevents
+    data corruption, but a duplicate Python process still shows up in
+    `ps` and can mislead users.  This check catches the case where the
+    old process is mid-teardown (heartbeat file gone, lock about to be
+    released) but still visible in `ps`.
+    """
+    import subprocess as _sp
+    abs_dir = str(working_dir.resolve())
+    try:
+        out = _sp.check_output(
+            ["ps", "-eo", "pid=,command="], stderr=_sp.DEVNULL, text=True
+        )
+    except Exception:
+        return  # ps unavailable — fall through to flock
+    needle = f"lingtai run {abs_dir}"
+    for line in out.splitlines():
+        trimmed = line.strip()
+        if needle in trimmed:
+            # Exclude our own PID
+            pid_str = trimmed.split(None, 1)[0]
+            if pid_str.isdigit() and int(pid_str) == os.getpid():
+                continue
+            print(
+                f"error: another lingtai agent is already running in {abs_dir}\n"
+                f"  PID {pid_str}: {trimmed}\n"
+                f"  If this is a stale process, kill it first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
 def run(working_dir: Path) -> None:
     """Boot agent into ASLEEP — wakes on external messages (mail/imap/telegram)."""
+    _check_duplicate_process(working_dir)
     _clean_signal_files(working_dir)
     data = load_init(working_dir)
 
