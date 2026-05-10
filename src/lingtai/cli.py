@@ -46,6 +46,17 @@ def load_init(working_dir: Path) -> dict:
         print(f"error: failed to materialize active preset: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Strip deprecated fields before validation so they don't trigger
+    # warnings or interfere with the refresh path.
+    from lingtai.init_schema import strip_deprecated
+    stripped = strip_deprecated(data)
+    if stripped:
+        # Persist cleanup to disk so the fields don't come back.
+        init_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
     try:
         warnings = validate_init(data)
     except ValueError as e:

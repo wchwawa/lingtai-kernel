@@ -22,6 +22,16 @@ TOP_OPTIONAL: dict[str, type | tuple[type, ...]] = {
     "mcp": dict,
 }
 
+# Top-level fields that were retired in past versions. strip_deprecated()
+# removes them from the data dict (and optionally from disk) so they never
+# reach validate_init().
+DEPRECATED_TOP_FIELDS: set[str] = {
+    # "soul" / "soul_file" — retired in v0.7.6. The soul-flow voice is
+    # now owned by the agent via soul(action='voice') and stored under
+    # manifest.soul.{voice,voice_prompt}.
+    "soul", "soul_file",
+}
+
 TOP_KNOWN: set[str] = {
     "manifest", "env_file", "venv_path", "addons", "mcp",
     "principle", "principle_file", "covenant", "covenant_file",
@@ -29,13 +39,7 @@ TOP_KNOWN: set[str] = {
     "procedures", "procedures_file", "brief", "brief_file",
     "pad", "pad_file", "prompt", "prompt_file",
     "comment", "comment_file",
-    # "soul" / "soul_file" — retired in v0.7.6. The soul-flow voice is
-    # now owned by the agent via soul(action='voice') and stored under
-    # manifest.soul.{voice,voice_prompt}. Kept in TOP_KNOWN so existing
-    # init.json files carrying these fields are silently ignored rather
-    # than emitting confusing "unknown field" warnings.
-    "soul", "soul_file",
-}
+} | DEPRECATED_TOP_FIELDS
 
 MANIFEST_REQUIRED: dict[str, type | tuple[type, ...]] = {
     "llm": dict,
@@ -61,6 +65,21 @@ MANIFEST_OPTIONAL: dict[str, type | tuple[type, ...]] = {
 }
 
 MANIFEST_KNOWN: set[str] = set(MANIFEST_REQUIRED) | set(MANIFEST_OPTIONAL)
+
+
+def strip_deprecated(data: dict) -> list[str]:
+    """Remove deprecated top-level fields from *data* in-place.
+
+    Returns the list of field names that were removed (empty if none).
+    """
+    removed: list[str] = []
+    for key in DEPRECATED_TOP_FIELDS:
+        if key in data:
+            del data[key]
+            removed.append(key)
+    if removed:
+        log.debug("stripped deprecated init.json fields: %s", ", ".join(sorted(removed)))
+    return removed
 
 
 def validate_init(data: dict) -> list[str]:

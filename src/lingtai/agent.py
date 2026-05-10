@@ -747,7 +747,7 @@ class Agent(BaseAgent):
         running agent thus always sees a fully resolved manifest.
         """
         import json
-        from .init_schema import validate_init
+        from .init_schema import strip_deprecated, validate_init
         from .config_resolve import resolve_paths
         from .presets import expand_inherit, materialize_active_preset
 
@@ -769,6 +769,18 @@ class Agent(BaseAgent):
             self._log("refresh_init_error",
                       error=f"preset materialization failed: {e}")
             return None
+
+        # Strip deprecated fields before validation so they don't trigger
+        # warnings or interfere with the refresh path.
+        stripped = strip_deprecated(data)
+        if stripped:
+            try:
+                init_path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass  # best-effort disk cleanup
 
         # Resolve "provider": "inherit" in capabilities against the main LLM.
         manifest = data.get("manifest")
@@ -884,13 +896,9 @@ class Agent(BaseAgent):
         if env_file:
             load_env_file(env_file)
 
-        # Resolve *_file fields for top-level text content. Note: "soul" /
-        # "soul_file" used to be honored here as a per-agent operator
-        # override that bypassed the consultation prompt resolver. As of
-        # v0.7.6 the soul-flow voice is owned by the agent via the
-        # soul(action='voice') intrinsic and resolved from manifest.soul
-        # — the legacy escape hatch is gone. Existing init.json files
-        # may still carry soul_file; it's silently ignored.
+        # Resolve *_file fields for top-level text content.
+        # Note: "soul" / "soul_file" were retired in v0.7.6 and are now
+        # stripped by strip_deprecated() before we get here.
         for key in ("covenant", "principle", "substrate", "procedures",
                     "brief", "pad", "prompt", "comment"):
             file_key = f"{key}_file"
