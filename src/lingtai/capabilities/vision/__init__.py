@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from lingtai_kernel.base_agent import BaseAgent
 
 PROVIDERS = {
-    "providers": ["minimax", "zhipu", "mimo", "gemini", "anthropic", "openai"],
+    "providers": ["minimax", "zhipu", "mimo", "gemini", "anthropic", "openai", "codex"],
     "default": None,
     "fallback_on_inherit": None,  # no agnostic fallback for vision
 }

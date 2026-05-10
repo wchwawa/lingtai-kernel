@@ -11,7 +11,7 @@ Vision capability — image understanding via pluggable VisionService backends.
 | `__init__.py` | 153 | `VisionManager`, `setup()`, provider registry, tool schema |
 
 **Key symbols:**
-- `PROVIDERS` (L27-31) — supported providers: `minimax`, `zhipu`, `mimo`, `gemini`, `anthropic`, `openai`. No default, no fallback.
+- `PROVIDERS` (L27-31) — supported providers: `minimax`, `zhipu`, `mimo`, `gemini`, `anthropic`, `openai`, `codex`. No default, no fallback.
 - `VisionManager` (L53) — handles tool calls; resolves relative image paths via `agent._working_dir` (L73).
 - `setup()` (L90) — entry point called by `capabilities.setup_capability()`. Creates `VisionManager`, registers `"vision"` tool on agent (L134).
 
@@ -37,5 +37,6 @@ Single file. No internal state — `VisionManager` instances hold agent + servic
 
 - OpenAI-compat fallback: if the agent's provider isn't in `PROVIDERS` but the main LLM's `_provider_defaults["api_compat"] == "openai"`, vision routes through `OpenAIVisionService` using the LLM's own `base_url`/`model`/`api_key`. Lets `custom`/`openrouter`/`deepseek`/`kimi` users opt into vision via `vision: {"provider": "inherit"}` in their preset. Succeeds only if the relay+model actually support OpenAI-style `image_url` content blocks; otherwise the runtime call surfaces the relay's error.
 - Graceful skip: if the agent's provider isn't in `PROVIDERS` AND the LLM is not OpenAI-compatible, setup returns `None` silently. Agent logs `capability_skipped`.
+- Codex is exposed through `PROVIDERS` and flows to `create_vision_service("codex", api_key=None)`; the service uses ChatGPT OAuth rather than an API key.
 - Provider-specific kwarg injection is opt-in per provider — prevents `TypeError` from passing unsupported kwargs to heterogeneous service constructors.
 - Local mlx-vlm provider exists in `services/vision/local.py` but is intentionally hidden from `PROVIDERS` (see docstring L11-14).
