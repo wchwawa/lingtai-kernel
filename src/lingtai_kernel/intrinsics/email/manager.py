@@ -629,7 +629,7 @@ class EmailManager:
 
         sender = (self._agent._mail_service.address
                   if self._agent._mail_service is not None and self._agent._mail_service.address
-                  else self._agent._working_dir.name)
+                  else str(self._agent._working_dir))
 
         base_payload = {
             "from": sender,
@@ -906,7 +906,7 @@ class EmailManager:
         my_address = (
             self._agent._mail_service.address
             if self._agent._mail_service
-            else self._agent._working_dir.name
+            else str(self._agent._working_dir)
         )
 
         reply_to = original["from"]
