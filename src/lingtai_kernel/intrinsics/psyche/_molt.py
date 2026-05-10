@@ -146,7 +146,35 @@ def _context_molt(agent, args: dict) -> dict:
             pid = provider_id_for_lingtai[lt_id]
             keep_pairs.append((call_for_provider_id[pid], result_for_provider_id[pid]))
 
+    # Parse keep_last — number of trailing entries to preserve across the molt.
+    keep_last_raw = args.get("keep_last")
+    keep_last: int | None = None
+    if keep_last_raw is not None:
+        try:
+            keep_last = int(keep_last_raw)
+        except (TypeError, ValueError):
+            return {"error": "keep_last must be an integer."}
+        if keep_last < 0:
+            return {"error": "keep_last must be non-negative."}
+        if keep_last == 0:
+            keep_last = None  # 0 is the same as not specifying it
+
     before_tokens = iface_pre.estimate_context_tokens()
+
+    # Capture keep_last entries from the pre-molt interface BEFORE the
+    # snapshot (which mutates iface_pre by closing orphan tool calls) and
+    # BEFORE the wipe. These are the last N non-system entries that will
+    # be replayed into the fresh session so the post-molt self retains
+    # recent conversational context.
+    # Exclude the molt call's own entry — it is replayed separately.
+    keep_last_entries: list = []
+    if keep_last is not None:
+        non_system = [
+            e for e in iface_pre.entries
+            if e.role != "system"
+            and not any(isinstance(b, ToolCallBlock) and b.id == tc_id for b in e.content)
+        ]
+        keep_last_entries = non_system[-keep_last:] if keep_last <= len(non_system) else non_system[:]
 
     # Snapshot the pre-molt interface to a discrete file so future
     # past-self consultation can load it as cached substrate. Best-effort.
@@ -217,7 +245,21 @@ def _context_molt(agent, args: dict) -> dict:
 
     iface = agent._session._chat.interface
 
-    # Replay kept tool-call pairs first (older than the molt itself).
+    # Replay keep_last entries first (oldest context).
+    for entry in keep_last_entries:
+        if entry.role == "assistant":
+            iface.add_assistant_message(content=entry.content)
+        elif entry.role == "user":
+            # User entries may contain ToolResultBlocks (tool results are
+            # user-role). Use add_tool_results for those, add_user_blocks
+            # for everything else.
+            tool_results = [b for b in entry.content if isinstance(b, ToolResultBlock)]
+            if tool_results and all(isinstance(b, ToolResultBlock) for b in entry.content):
+                iface.add_tool_results(tool_results)
+            else:
+                iface.add_user_blocks(entry.content)
+
+    # Replay kept tool-call pairs next (older than the molt itself).
     for call_block, result_block in keep_pairs:
         iface.add_assistant_message(content=[call_block])
         iface.add_tool_results([result_block])
@@ -234,6 +276,7 @@ def _context_molt(agent, args: dict) -> dict:
         after_tokens=after_tokens,
         molt_count=agent._molt_count,
         kept_tool_calls=len(keep_pairs),
+        kept_last=len(keep_last_entries),
     )
 
     # Persist the agent's retrospective to system/summaries/. Best-effort —
@@ -259,6 +302,7 @@ def _context_molt(agent, args: dict) -> dict:
         "tokens_after": after_tokens,
         "tokens_shed": max(0, before_tokens - after_tokens),
         "kept_tool_calls": len(keep_pairs),
+        "kept_last": len(keep_last_entries),
         "archive_path": str(archive_path.relative_to(agent._working_dir))
             if archive_path.exists() else None,
         "summary_path": str(summary_path.relative_to(agent._working_dir))
@@ -295,7 +339,8 @@ def _name_nickname(agent, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) -> dict:
+def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0,
+                    keep_last: int | None = None) -> dict:
     """Forced molt with a system-authored summary.
 
     Called by base_agent from three paths:
@@ -312,6 +357,10 @@ def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) 
     of its own past tool calls — surface honesty about the molt being
     system-initiated lives in the args (``_initiator: "system"``) and the
     result note.
+
+    Optional ``keep_last`` preserves the last N non-system entries from
+    the pre-molt interface into the fresh session, giving the post-molt
+    self recent conversational context without relying on pad.md.
     """
     from ...i18n import t
 
@@ -342,6 +391,12 @@ def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) 
 
     iface_pre = agent._chat.interface
     before_tokens = iface_pre.estimate_context_tokens()
+
+    # Capture keep_last entries from the pre-molt interface BEFORE wiping.
+    keep_last_entries: list = []
+    if keep_last is not None and keep_last > 0:
+        non_system = [e for e in iface_pre.entries if e.role != "system"]
+        keep_last_entries = non_system[-keep_last:] if keep_last <= len(non_system) else non_system[:]
 
     from . import _write_molt_snapshot
     _write_molt_snapshot(
@@ -398,6 +453,17 @@ def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) 
     agent._session.ensure_session()
     iface = agent._session._chat.interface
 
+    # Replay keep_last entries first (oldest context).
+    for entry in keep_last_entries:
+        if entry.role == "assistant":
+            iface.add_assistant_message(content=entry.content)
+        elif entry.role == "user":
+            tool_results = [b for b in entry.content if isinstance(b, ToolResultBlock)]
+            if tool_results and all(isinstance(b, ToolResultBlock) for b in entry.content):
+                iface.add_tool_results(tool_results)
+            else:
+                iface.add_user_blocks(entry.content)
+
     iface.add_assistant_message(content=[synth_call])
 
     after_tokens = iface.estimate_context_tokens()
@@ -423,6 +489,7 @@ def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) 
         "tokens_after": after_tokens,
         "tokens_shed": max(0, before_tokens - after_tokens),
         "kept_tool_calls": 0,
+        "kept_last": len(keep_last_entries),
         "archive_path": str(archive_path.relative_to(agent._working_dir))
             if archive_path.exists() else None,
         "summary_path": str(summary_path.relative_to(agent._working_dir))
@@ -440,6 +507,7 @@ def context_forget(agent, *, source: str = "warning_ladder", attempts: int = 0) 
         after_tokens=after_tokens,
         molt_count=agent._molt_count,
         kept_tool_calls=0,
+        kept_last=len(keep_last_entries),
         initiator="system",
         source=source,
     )
