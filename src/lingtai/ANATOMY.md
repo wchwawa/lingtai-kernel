@@ -11,7 +11,7 @@ PyPI wrapper package — `Agent(BaseAgent)` with composable capabilities, preset
 | `__init__.py` | Public API facade — re-exports `Agent`, `BaseAgent`, `Message`, services from kernel+wrapper |
 | `__main__.py` | `python -m lingtai` → `cli.main()` |
 | `agent.py` | **THE key file.** `Agent(BaseAgent)` — layer-2 agent with capability composition, preset swap, MCP, init.json refresh |
-| `cli.py` | `lingtai run <dir>` / `lingtai check-caps` entry points |
+| `cli.py` | `lingtai-agent run <dir>` / `lingtai-agent check-caps` entry points |
 | `network.py` | Read-only network topology crawler — avatar/contact/mail edge discovery |
 | `presets.py` | Preset library — load, validate, materialize `{llm, capabilities}` bundles |
 | `init_schema.py` | `validate_init()` — strict schema for init.json |

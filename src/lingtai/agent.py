@@ -559,7 +559,7 @@ class Agent(BaseAgent):
     def _cpr_agent(self, address: str) -> "Agent | None":
         """Resuscitate a suspended agent by launching it as a detached process.
 
-        Uses the resolved venv Python to run `lingtai run <dir>`.
+        Uses the resolved venv Python to run `lingtai-agent run <dir>`.
         The target must have init.json to boot from.
         """
         import subprocess
@@ -1208,7 +1208,7 @@ class Agent(BaseAgent):
             self._prompt_manager.delete_section("comment")
 
     def _build_launch_cmd(self) -> list[str] | None:
-        """Return the command to relaunch this agent via lingtai run."""
+        """Return the command to relaunch this agent via lingtai-agent run."""
         from .venv_resolve import resolve_venv, venv_python
         data = self._read_init()
         venv_dir = resolve_venv(data)

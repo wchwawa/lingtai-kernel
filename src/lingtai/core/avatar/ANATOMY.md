@@ -9,7 +9,7 @@ processes. Two modes:
   plus `init.json`, strip name + history. The avatar is a doppelgänger — same
   character, pad, knowledge — but starts a fresh conversation.
 
-Both modes launch `lingtai run <dir>` as a detached process. The avatar is an
+Both modes launch `lingtai-agent run <dir>` as a detached process. The avatar is an
 independent life — its existence does not depend on yours.
 
 ## Components
@@ -36,7 +36,7 @@ avatar/__init__.py
   ├── _spawn()                      — validates name, checks liveness, prepares working dir, launches process
   ├── _make_avatar_init()           — builds avatar's init.json from parent's (strips identity, reroots paths)
   ├── _prepare_deep()               — copies system/ + codex/ + exports/ + combo.json for deep mode
-  ├── _launch()                     — runs `lingtai run <dir>` as a detached subprocess
+  ├── _launch()                     — runs `lingtai-agent run <dir>` as a detached subprocess
   ├── _wait_for_boot()              — polls .agent.heartbeat or process exit for boot verification
   │
   │  Ledger:

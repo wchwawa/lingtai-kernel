@@ -1,4 +1,4 @@
-"""Integration test: lingtai run boots an agent, tests .sleep (asleep) and .suspend (shutdown)."""
+"""Integration test: lingtai-agent run boots an agent, tests .sleep (asleep) and .suspend (shutdown)."""
 from __future__ import annotations
 
 import json

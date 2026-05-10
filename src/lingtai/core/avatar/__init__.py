@@ -9,7 +9,7 @@ Deep (二重身): Copy the entire working dir (system/, codex/, exports/)
     The avatar is a doppelgänger — same character, pad, knowledge —
     but starts a fresh conversation.
 
-Both modes launch `lingtai run <dir>` as a fully detached process.
+Both modes launch `lingtai-agent run <dir>` as a fully detached process.
 The avatar is an independent life — its existence does not depend on yours.
 
 Maintains an append-only ledger (delegates/ledger.jsonl) that records
@@ -146,7 +146,7 @@ class AvatarManager:
     """Spawns avatar (分身) peer agents as detached processes.
 
     Each avatar gets its own working directory with init.json and is
-    launched via `lingtai run`.  No in-process references — liveness
+    launched via `lingtai-agent run`.  No in-process references — liveness
     is checked via the filesystem (handshake.is_alive).
     """
 
@@ -742,7 +742,7 @@ class AvatarManager:
 
     @staticmethod
     def _launch(working_dir: Path) -> tuple[subprocess.Popen, Path]:
-        """Launch `lingtai run <dir>` as a fully detached process.
+        """Launch `lingtai-agent run <dir>` as a fully detached process.
 
         Captures stderr to ``logs/spawn.stderr`` so a child that exits before
         writing its handshake leaves a usable diagnostic behind. Returns the

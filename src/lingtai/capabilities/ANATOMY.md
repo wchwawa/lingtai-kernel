@@ -35,5 +35,5 @@ Root capabilities package — registry and setup dispatcher for composable agent
 ## Notes
 
 - `expand_groups()` (L39) is a pure function; groups expand before `setup_capability()` is called.
-- `get_all_providers()` (L74) returns a subset of `_BUILTIN` (the user-facing ones) plus their `PROVIDERS` metadata; used by `lingtai check-caps` CLI.
+- `get_all_providers()` (L74) returns a subset of `_BUILTIN` (the user-facing ones) plus their `PROVIDERS` metadata; used by `lingtai-agent check-caps` CLI.
 - Both `_media_host` and `_zhipu_mode` are purely derived from `agent.service._base_url` — no external calls.

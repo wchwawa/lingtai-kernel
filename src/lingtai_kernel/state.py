@@ -16,7 +16,7 @@ class AgentState(enum.Enum):
     ACTIVE/IDLE --(sleep)-------> ASLEEP
     ASLEEP --(inbox message)---> ACTIVE  (wake from sleep)
     ASLEEP --(.suspend/SIGINT)-> SUSPENDED (process exits)
-    SUSPENDED --(lingtai run)---> IDLE    (reconstructed from working dir)
+    SUSPENDED --(lingtai-agent run)---> IDLE    (reconstructed from working dir)
     """
 
     ACTIVE = "active"

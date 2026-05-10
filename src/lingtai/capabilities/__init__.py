@@ -76,7 +76,7 @@ def get_all_providers() -> dict[str, dict]:
 
     Returns a dict mapping capability name to
     ``{"providers": [...], "default": ... }``.
-    Used by ``lingtai check-caps`` CLI.
+    Used by ``lingtai-agent check-caps`` CLI.
     """
     _USER_FACING: dict[str, str] = {
         "file": "lingtai.core.read",

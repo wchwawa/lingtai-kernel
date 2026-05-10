@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [project.scripts]
-lingtai = "lingtai.cli:main"
+lingtai-agent = "lingtai.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

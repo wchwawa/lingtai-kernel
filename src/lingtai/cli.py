@@ -1,4 +1,4 @@
-"""lingtai run <working_dir> — boot agent into ASLEEP, wake on external messages."""
+"""lingtai-agent run <working_dir> — boot agent into ASLEEP, wake on external messages."""
 from __future__ import annotations
 
 import argparse
@@ -234,7 +234,7 @@ def run(working_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="lingtai",
+        prog="lingtai-agent",
         description="lingtai agent runtime",
     )
     sub = parser.add_subparsers(dest="command")

@@ -33,14 +33,14 @@ pip install lingtai
 
 ## CLI
 
-The `lingtai` command is the agent runtime — it boots and runs individual agents.
+The `lingtai-agent` command is the agent runtime — it boots and runs individual agents.
 
 ```bash
 # Boot an agent from its working directory
-lingtai run /path/to/agent/
+lingtai-agent run /path/to/agent/
 
 # Check available capability providers
-lingtai check-caps
+lingtai-agent check-caps
 ```
 
 Agents are typically managed by the [TUI](https://github.com/Lingtai-AI/lingtai), which handles initialization, lifecycle, and monitoring. The CLI is for scripting, custom agents, and programmatic use.

@@ -387,7 +387,7 @@ def _perform_refresh(agent) -> None:
             pass
     agent._save_chat_history()
     # Bound-method dispatch — _build_launch_cmd lives on BaseAgent (returns
-    # None) and Agent (returns the real `lingtai run` cmd). A prior version
+    # None) and Agent (returns the real `lingtai-agent run` cmd). A prior version
     # called a module-level _build_launch_cmd shadow that always returned
     # None, silently no-opping every user refresh on the Agent subclass —
     # see issue #7, confirmed in vivo against deepseek_pro 2026-05-05.
