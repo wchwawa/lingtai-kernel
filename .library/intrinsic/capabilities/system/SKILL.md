@@ -1,22 +1,24 @@
 ---
 name: system-manual
 description: >
-  Detailed reference for the `system` tool — lifecycle control, preset management,
-  notification queries, and inter-agent karma operations.
+  Operational guide for the `system` tool — lifecycle control, preset
+  management, notification queries, and inter-agent karma operations.
 
   Reach for this manual when:
-    - You need to understand what `refresh` reloads and when to use it.
-    - You want to swap presets and need to understand the tier ladder and
-      connectivity checks.
-    - You're confused about the difference between `lull`, `suspend`, `cpr`,
-      and `clear` — or when to use `nirvana`.
-    - You need to understand the notification system's replace-only semantics
-      and synthesized calls.
-    - You're debugging why a `clear` didn't produce the expected recovery summary.
+    - You called `system(action='refresh')` but something didn't reload —
+      your toolbox, skills, or prompt sections look stale.
+    - You tried to swap presets and got a "molt first" refusal, or the
+      preset you wanted showed `unreachable` in connectivity.
+    - You put an agent to sleep with `lull` and it didn't wake up on mail,
+      or you're unsure whether to use `suspend` vs `lull`.
+    - Notifications arrived but you can't find them, or the `notification`
+      action returned nothing while you know mail is unread.
+    - You need to use `clear` on a stuck agent but aren't sure what gets
+      preserved vs reset.
 
-  Does NOT cover: the system tool's argument schema (in the tool description
-  itself) or the kernel's internal lifecycle state machine (see
-  lingtai-kernel-anatomy for that).
+  Does NOT cover: the system tool's argument schema (in the tool
+  description itself) or the kernel's internal lifecycle state machine
+  (see lingtai-kernel-anatomy for that).
 
   Companion: `daemon-manual` for emanation-specific inspection patterns;
   `lingtai-kernel-anatomy` for the runtime loop architecture.
