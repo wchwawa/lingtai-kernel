@@ -151,6 +151,24 @@ Phase 2 (`d2da97e`) migrated all in-tree producers (mail, system events, soul fl
 
 Distinct primitive (and unrelated to notifications) — `interface.close_pending_tool_calls(reason)` (`llm/interface.py:344`) synthesizes `tool_result` placeholders for orphan tool_calls when the wire chat itself ends mid-pair (process killed mid-turn, snapshot saved mid-turn). Marks them `synthesized=True`; if a real result arrives later for the same id, `add_tool_results` overwrites the placeholder so the wire stays honest. Used in `base_agent/turn.py:202, 446, 461` after exceptions, and at snapshot save time in `intrinsics/psyche/_snapshots.py`. The notification path repurposes the same `synthesized=True` flag, but the two systems don't share code.
 
+### Known issue: ACTIVE meta injection invalidates strict-prefix caches
+
+`_inject_notification_meta` (`base_agent/__init__.py:1126`) prepends `notifications:\n<json>\n\n` onto the most recent `ToolResultBlock.content` (line ~1213), and **also strips stale notification prefixes from every other `ToolResultBlock` in user entries** (lines ~1199-1209). The strip-step edits content at byte positions earlier than the new tail target, so a strict-prefix automatic cache (any backend whose cache is a single lookup over the full input from byte 0) invalidates everything from the earliest edited block forward.
+
+Impact observed on the codex preset (`gpt-5.5` via ChatGPT Codex Responses API, strict-prefix automatic cache): ~10% of LLM calls land in the 0-10% cache-rate bucket and correlate tightly with `notification_stashed_active` + `notification_meta_injected` event sequences in `events.jsonl`. Two example incidents from `~/work/lingtai-dev/.lingtai/codex-gpt5.5/logs/token_ledger.jsonl`:
+
+- `2026-05-11T07:07:25Z` — 178k input, 0 cached after 4× `notification_stashed_active sources=['molt']`.
+- `2026-05-11T07:27:52Z` — 161k input, 0 cached after 6× `notification_stashed_active sources=['email']`.
+
+Anthropic / MiniMax workloads are unaffected — the kernel emits explicit `cache_control: ephemeral` breakpoints on the system prompt and tools schema (`lingtai/llm/anthropic/adapter.py:75, 92, 130`); tool-result history lives past the last breakpoint, so the strip-step doesn't invalidate the cached portion. DeepSeek / MiMo workloads appear unaffected on current load patterns — their backends' cache windows absorb the impact at the byte level — but the same workload type with shorter histories or different shard routing could surface the same symptom.
+
+Fix shapes (none currently scheduled):
+- **Append-only injection**: stop modifying existing `ToolResultBlock.content`; append notifications as a new tail message. Cleanest for cache, changes wire shape and substrate guidance.
+- **Single-pointer tracking**: keep prefix-on-tool_result semantics but track which block currently bears the prefix; mutate at most 2 blocks per injection (the prior pointer + the new target) instead of walking every user entry. Reduces edit count from N to 1-2; doesn't eliminate mid-prefix edits when the prior pointer is back in history.
+- **Lazy strip**: prepend on the new tail only; never strip old prefixes. Single edit per injection. Wire ends up with multiple "live-looking" notification prefixes — substrate would need to teach the agent that only the most recent is current.
+
+The current implementation is intentional for non-strict-prefix backends; this note exists so future readers don't rediscover the codex-specific cost without context. Don't fix until the codex case is load-bearing.
+
 ## Composition
 
 This file is the top of the kernel anatomy tree. Each subfolder below has its own `ANATOMY.md` — descend into the one that holds your question.
