@@ -1,8 +1,8 @@
 """Knowledge capability — private durable knowledge across molts.
 
-A journal-shaped private knowledge store persisted in the legacy
-codex/codex.json file. Each entry's id + title + summary is always visible in
-the system prompt; content and supplementary material load on demand via view().
+A journal-shaped private knowledge store persisted in knowledge/knowledge.json.
+Each entry's id + title + summary is always visible in the system prompt;
+content and supplementary material load on demand via view().
 
 Usage:
     agent = Agent(capabilities=["knowledge"])
@@ -106,8 +106,10 @@ class KnowledgeManager:
             lines.append(f"- [{e['id']}] {e['title']}: {e['summary']}")
         lines.append("")
         lines.append(
-            "Use knowledge(view, ids=[...]) to read full content. "
-            "Pass include_supplementary=true for backing material."
+            "This is a compact index only. "
+            "Use knowledge(view, ids=[...]) to disclose full content "
+            "for selected entries. Pass include_supplementary=true only "
+            "when you need backing material."
         )
 
         self._agent.update_system_prompt("knowledge", "\n".join(lines), protected=True)

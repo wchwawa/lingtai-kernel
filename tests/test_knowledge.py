@@ -64,6 +64,45 @@ def test_knowledge_tool_uses_knowledge_store(tmp_path):
     finally:
         agent.stop(timeout=1.0)
 
+def test_prompt_catalog_is_progressive_disclosure_index(tmp_path):
+    agent = Agent(
+        service=make_mock_service(), agent_name="test", working_dir=tmp_path / "test",
+        capabilities={"knowledge": {"knowledge_limit": 50}},
+    )
+    try:
+        mgr = agent.get_capability("knowledge")
+        full_content = "FULL_CONTENT_SENTINEL only view should disclose"
+        supplementary = "SUPPLEMENTARY_SENTINEL only explicit supplementary view should disclose"
+        result = mgr.handle({
+            "action": "submit",
+            "title": "Progressive Disclosure Entry",
+            "summary": "Short visible summary.",
+            "content": full_content,
+            "supplementary": supplementary,
+        })
+
+        prompt = agent._prompt_manager.read_section("knowledge") or ""
+        assert result["id"] in prompt
+        assert "Progressive Disclosure Entry" in prompt
+        assert "Short visible summary." in prompt
+        assert "compact index only" in prompt
+        assert full_content not in prompt
+        assert supplementary not in prompt
+
+        viewed = mgr.handle({"action": "view", "ids": [result["id"]]})
+        assert viewed["entries"][0]["content"] == full_content
+        assert "supplementary" not in viewed["entries"][0]
+
+        viewed_with_supplementary = mgr.handle({
+            "action": "view",
+            "ids": [result["id"]],
+            "include_supplementary": True,
+        })
+        assert viewed_with_supplementary["entries"][0]["supplementary"] == supplementary
+    finally:
+        agent.stop(timeout=1.0)
+
+
 def test_knowledge_manager_accessible_by_exact_name(tmp_path):
     agent = Agent(
         service=make_mock_service(), agent_name="test", working_dir=tmp_path / "test",

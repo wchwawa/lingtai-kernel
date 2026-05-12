@@ -93,6 +93,19 @@ prompt section `knowledge`:
 Only ids, titles, and summaries are always injected. Full `content` and
 `supplementary` stay out of the prompt until loaded through `view`.
 
+## Progressive disclosure
+
+Knowledge is exposed in layers:
+
+1. Prompt catalog: a compact index with `id`, `title`, and `summary` only.
+2. `knowledge(view, ids=[...])`: full `content` for selected entries.
+3. `include_supplementary=true`: backing material only when explicitly needed.
+
+This keeps the always-on prompt small while preserving deep recall on demand.
+The prompt catalog must never include full `content` or `supplementary`; tests
+lock this behavior because leaking deep material into the system prompt defeats
+the progressive-disclosure contract.
+
 ## Capacity configuration
 
 `KnowledgeManager.DEFAULT_MAX_ENTRIES` is `50`. `knowledge_limit=N` overrides the
