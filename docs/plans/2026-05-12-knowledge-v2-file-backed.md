@@ -174,8 +174,9 @@ boundary we are protecting.
 
 ## Migration
 
-The patch includes a one-time migration for the previous JSON-backed store. On
-setup or `knowledge({action: "info"})`, if `<agent>/knowledge/knowledge.json`
+The patch includes a one-time migration for previous JSON-backed stores. On
+setup or `knowledge({action: "info"})`, if either
+`<agent>/knowledge/knowledge.json` or the older `<agent>/codex/codex.json`
 exists, the capability reads its `entries` array and converts each object:
 
 - `title` becomes the filesystem slug seed and the optional frontmatter `title`.
@@ -186,7 +187,7 @@ exists, the capability reads its `entries` array and converts each object:
 - `id` is preserved as frontmatter `legacy_id`.
 
 After at least one successful migrated entry, the source JSON is renamed to
-`knowledge.json.migrated` (or a numbered variant) so migration does not repeat.
+`knowledge.json.migrated` or `codex.json.migrated` (or a numbered variant) so migration does not repeat.
 Malformed JSON or malformed entries are reported as `problems` in the `info`
 snapshot; the prompt catalog only includes successfully migrated/scanned
 entries.

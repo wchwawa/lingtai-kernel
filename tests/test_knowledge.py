@@ -443,3 +443,47 @@ def test_legacy_knowledge_json_migration_uses_unique_slugs(tmp_path):
         assert (legacy_dir / "duplicate-b2" / "KNOWLEDGE.md").is_file()
     finally:
         agent.stop(timeout=1.0)
+
+
+def test_legacy_codex_json_migrates_to_knowledge_md(tmp_path):
+    """Old codex/codex.json entries are converted into the new knowledge catalog."""
+    workdir = tmp_path / "agent"
+    codex_dir = workdir / "codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    (codex_dir / "codex.json").write_text(
+        '{"version": 1, "entries": [{'
+        '"id": "oldcodex", '
+        '"title": "Old Codex Entry", '
+        '"summary": "Migrated from the pre-rename codex store.", '
+        '"content": "Historical codex content.", '
+        '"supplementary": "Historical backing material."'
+        '}]}',
+        encoding="utf-8",
+    )
+
+    agent = Agent(
+        service=make_mock_service(),
+        agent_name="test",
+        working_dir=workdir,
+        capabilities={"knowledge": {}},
+    )
+    try:
+        result = agent._tool_handlers["knowledge"]({"action": "info"})
+        assert result["catalog_size"] == 1
+        assert result["problems"] == []
+
+        entry = workdir / "knowledge" / "old-codex-entry"
+        md = entry / "KNOWLEDGE.md"
+        refs = entry / "references" / "supplementary.md"
+        assert md.is_file()
+        assert refs.is_file()
+        text = md.read_text(encoding="utf-8")
+        assert 'origin: "migrated-codex-json"' in text
+        assert 'legacy_id: "oldcodex"' in text
+        assert "Historical codex content." in text
+        assert refs.read_text(encoding="utf-8") == "Historical backing material.\n"
+
+        assert not (codex_dir / "codex.json").exists()
+        assert (codex_dir / "codex.json.migrated").is_file()
+    finally:
+        agent.stop(timeout=1.0)

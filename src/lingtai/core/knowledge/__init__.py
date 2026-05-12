@@ -206,13 +206,13 @@ def _unique_entry_dir(root: Path, preferred: str, legacy_id: str) -> tuple[Path,
         i += 1
 
 
-def _format_knowledge_md(*, name: str, title: str, description: str, content: str, supplementary: str, legacy_id: str, created_at: str) -> str:
+def _format_knowledge_md(*, name: str, title: str, description: str, content: str, supplementary: str, legacy_id: str, created_at: str, origin: str) -> str:
     frontmatter = [
         "---",
         f"name: {_yaml_quote(name)}",
         f"description: {_yaml_quote(description)}",
         "version: \"1.0.0\"",
-        "origin: \"migrated-knowledge-json\"",
+        f"origin: {_yaml_quote(origin)}",
     ]
     if legacy_id:
         frontmatter.append(f"legacy_id: {_yaml_quote(legacy_id)}")
@@ -240,15 +240,7 @@ def _format_knowledge_md(*, name: str, title: str, description: str, content: st
     return "\n".join(body_parts).rstrip() + "\n"
 
 
-def _migrate_legacy_json(knowledge_dir: Path) -> list[dict]:
-    """One-time migration from ``knowledge/knowledge.json`` into folders.
-
-    Old entries become ``knowledge/<slug>/KNOWLEDGE.md``. The old
-    ``supplementary`` field is written to ``references/supplementary.md`` and
-    linked from the main document. The source JSON is renamed after a successful
-    migration so the operation is not repeated on the next scan.
-    """
-    legacy = knowledge_dir / "knowledge.json"
+def _migrate_one_legacy_json(knowledge_dir: Path, legacy: Path, *, label: str, origin: str) -> list[dict]:
     if not legacy.is_file():
         return []
 
@@ -256,16 +248,16 @@ def _migrate_legacy_json(knowledge_dir: Path) -> list[dict]:
     try:
         data = json.loads(legacy.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        return [{"folder": "knowledge.json", "reason": f"cannot migrate legacy knowledge.json: {e}"}]
+        return [{"folder": label, "reason": f"cannot migrate legacy {label}: {e}"}]
 
     raw_entries = data.get("entries", []) if isinstance(data, dict) else []
     if not isinstance(raw_entries, list):
-        return [{"folder": "knowledge.json", "reason": "cannot migrate legacy knowledge.json: entries is not a list"}]
+        return [{"folder": label, "reason": f"cannot migrate legacy {label}: entries is not a list"}]
 
     migrated = 0
     for idx, raw in enumerate(raw_entries, 1):
         if not isinstance(raw, dict):
-            problems.append({"folder": f"knowledge.json[{idx}]", "reason": "legacy entry is not an object"})
+            problems.append({"folder": f"{label}[{idx}]", "reason": "legacy entry is not an object"})
             continue
         legacy_id = str(raw.get("id") or idx)
         title = str(raw.get("title") or raw.get("content") or f"Entry {idx}").strip()
@@ -284,26 +276,51 @@ def _migrate_legacy_json(knowledge_dir: Path) -> list[dict]:
                 supplementary=supplementary,
                 legacy_id=legacy_id,
                 created_at=created_at,
+                origin=origin,
             )
             _atomic_write_text(entry_dir / "KNOWLEDGE.md", md)
             if supplementary:
                 _atomic_write_text(entry_dir / "references" / "supplementary.md", supplementary.rstrip() + "\n")
             migrated += 1
         except OSError as e:
-            problems.append({"folder": f"knowledge.json[{idx}]", "reason": f"migration write failed: {e}"})
+            problems.append({"folder": f"{label}[{idx}]", "reason": f"migration write failed: {e}"})
 
     if migrated:
-        backup = knowledge_dir / "knowledge.json.migrated"
+        backup = legacy.with_name(legacy.name + ".migrated")
         if backup.exists():
             n = 2
-            while (knowledge_dir / f"knowledge.json.migrated.{n}").exists():
+            while legacy.with_name(legacy.name + f".migrated.{n}").exists():
                 n += 1
-            backup = knowledge_dir / f"knowledge.json.migrated.{n}"
+            backup = legacy.with_name(legacy.name + f".migrated.{n}")
         try:
             legacy.rename(backup)
         except OSError as e:
-            problems.append({"folder": "knowledge.json", "reason": f"migrated entries but could not rename legacy file: {e}"})
+            problems.append({"folder": label, "reason": f"migrated entries but could not rename legacy file: {e}"})
 
+    return problems
+
+
+def _migrate_legacy_json(working_dir: Path, knowledge_dir: Path) -> list[dict]:
+    """One-time migration from legacy JSON stores into folders.
+
+    Old entries become ``knowledge/<slug>/KNOWLEDGE.md``. The old
+    ``supplementary`` field is written to ``references/supplementary.md`` and
+    linked from the main document. Source JSON files are renamed after a
+    successful migration so the operation is not repeated on the next scan.
+    """
+    problems: list[dict] = []
+    problems.extend(_migrate_one_legacy_json(
+        knowledge_dir,
+        knowledge_dir / "knowledge.json",
+        label="knowledge/knowledge.json",
+        origin="migrated-knowledge-json",
+    ))
+    problems.extend(_migrate_one_legacy_json(
+        knowledge_dir,
+        working_dir / "codex" / "codex.json",
+        label="codex/codex.json",
+        origin="migrated-codex-json",
+    ))
     return problems
 
 
@@ -353,7 +370,7 @@ def _reconcile(agent: "BaseAgent") -> dict:
     working_dir = agent._working_dir
     knowledge_dir = working_dir / "knowledge"
 
-    migration_problems = _migrate_legacy_json(knowledge_dir)
+    migration_problems = _migrate_legacy_json(working_dir, knowledge_dir)
     entries, problems = _scan(knowledge_dir)
     problems = migration_problems + problems
 

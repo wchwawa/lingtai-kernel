@@ -37,9 +37,7 @@ the regular `read` tool.
 - Prompt state: protected `knowledge` section holds the preamble + `<knowledge>`
   XML block.
 - No JSON store and no per-entry size cap. A one-time legacy migration
-  converts `knowledge/knowledge.json` entries into `KNOWLEDGE.md` folders,
-  writes old `supplementary` text to `references/supplementary.md`, and renames
-  the source JSON to `knowledge.json.migrated`.
+  converts `knowledge/knowledge.json` and old `codex/codex.json` entries into `KNOWLEDGE.md` folders, writes old `supplementary` text to `references/supplementary.md`, and renames the source JSON to `<name>.json.migrated`.
 
 ## Invariants
 
