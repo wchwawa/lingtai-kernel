@@ -106,6 +106,14 @@ The prompt catalog must never include full `content` or `supplementary`; tests
 lock this behavior because leaking deep material into the system prompt defeats
 the progressive-disclosure contract.
 
+## Future direction
+
+This contract describes the current JSON-backed `knowledge` capability. The
+next architecture step is the file-backed, paper-like knowledge v2 design in
+`docs/plans/2026-05-12-knowledge-v2-file-backed.md`. That design is explicitly
+future-facing: it does not change the current tool surface or persistence path
+until implemented by later PRs.
+
 ## Capacity configuration
 
 `KnowledgeManager.DEFAULT_MAX_ENTRIES` is `50`. `knowledge_limit=N` overrides the
