@@ -11,7 +11,7 @@ System intrinsic — runtime, lifecycle, and synchronization. Provides the agent
   - `_dismiss` (re-exported from `notification.py`) — agent-facing generic notification dismiss; routes `channel`/`force` through `notifications.dismiss_channel` and keeps a one-release legacy `ids=` soak path.
   - **`publish_notification` / `clear_notification`** (re-exported from `lingtai_kernel.notifications` as `submit` / `clear`) — canonical producer entry point. Importable as `from lingtai_kernel.intrinsics.system import publish_notification, clear_notification`. The system module owns the notification surface conceptually; the implementation lives at the kernel root so non-intrinsic callers (and external scripts) can import it without going through the intrinsic surface.
   - All handler functions re-exported from sub-modules for backward compatibility.
-  - `handle()` (`__init__.py:87-115`) — main dispatcher with explicit dispatch table. The `notification` action takes a fast path that returns `collect_notifications(agent._working_dir)` directly without going through the dispatch table — voluntary reads of the agent's own `.notification/` state.
+  - `handle()` (`__init__.py:82-109`) — main dispatcher with explicit dispatch table. The `notification` action takes a fast path that returns `collect_notifications(agent._working_dir)` directly without going through the dispatch table — voluntary reads of the agent's own `.notification/` state.
 
 - `preset.py` — Preset management and refresh.
   - `_preset_ref_in()` (`preset.py:9-36`) — normalized membership test for preset path strings (~/foo vs absolute).
@@ -35,7 +35,7 @@ System intrinsic — runtime, lifecycle, and synchronization. Provides the agent
 
 - `schema.py` — Tool registration.
   - `get_description()` (`schema.py:5-7`) — returns localized tool description.
-  - `get_schema()` (`schema.py:10-47`) — returns JSON schema for the system tool. Action enum includes `dismiss` plus `channel`/`force` parameters for generic notification clearing; legacy `ids` remains handler-only and is no longer taught in schema.
+  - `get_schema()` (`schema.py:10-46`) — returns JSON schema for the system tool. Action enum includes `dismiss` plus `channel`/`force` parameters for generic notification clearing; legacy `ids` remains handler-only and is no longer taught in schema.
 
 ## Connections
 

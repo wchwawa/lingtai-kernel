@@ -54,7 +54,7 @@ user:      tool_result(id=notif_…, synthesized=True, content="""{
            }""")
 ```
 
-The shape comes from `BaseAgent._inject_notification_pair` (`base_agent/__init__.py:879`). The `_synthesized: True` envelope marker (also written as the `synthesized=True` flag on the `ToolResultBlock`) lets the agent distinguish kernel-injected reads from voluntary `system(action="notification")` calls when reading conversation history.
+The shape comes from `BaseAgent._inject_notification_pair` (`base_agent/__init__.py:1002`). The `_synthesized: True` envelope marker (also written as the `synthesized=True` flag on the `ToolResultBlock`) lets the agent distinguish kernel-injected reads from voluntary `system(action="notification")` calls when reading conversation history. The kernel also injects a top-level `_notification_guidance` field plus a source-specific `_notification_guidance` field into each per-source block under `notifications` — this is kernel safety framing, separate from the producer's own optional `instructions` field (see Producer contract below).
 
 ### Filesystem layout
 
@@ -100,7 +100,7 @@ Side effects of `publish_notification`:
 - Writes `.notification/<tool_name>.json` atomically (tmp + rename) with `{header, icon, priority, published_at, data}` plus an optional top-level `instructions` field when the producer supplies one.
 - Returns immediately — no enqueue, no wake post. The kernel sync mechanism (next section) handles wire injection.
 
-The optional `instructions` field is the producer-side directive — text describing what the agent must do to dismiss or act on the notification. It rides with the payload so each producer owns its own dismissal contract; generic frontend / kernel code does not need to know per-producer rules. Email uses it for "call read or dismiss to clear"; soul flow leaves it unset (voices are advisory, no dismissal needed); MCP servers can carry their own.
+The optional `instructions` field is the producer-side directive — text describing what the agent must do to dismiss or act on the notification. It rides with the payload so each producer owns its own dismissal contract; generic frontend / kernel code does not need to know per-producer rules. Email uses it for "call read or dismiss to clear"; soul flow sets it to advise that voices are inner monologue (no dismissal needed); MCP servers can carry their own. Separately from `instructions`, the kernel injects its own `_notification_guidance` text both at the envelope top level and into each per-source block when it synthesizes the wire pair — that is kernel-side safety framing about source provenance and verification, not a producer dismissal contract.
 
 **Dismissal contract.** Producers fall into three categories. **Category A — mirror over real producer state** (e.g. `email` over `read.json`) MUST register with `register_generic_dismiss_guard("<channel>", "<suggested verb>")`; generic clearing would leave producer state unchanged and the mirror inaccurate. **Category B — notification IS the output** (e.g. `soul`, `system`) may use generic `system(action="dismiss", channel=...)` or convenience aliases. **Category C — coalesced event summary** (e.g. `mcp.<server>`) may use generic dismiss after the agent has handled the summarized event. New producers declare the category and follow that contract.
 
@@ -108,15 +108,16 @@ External producers (MCP servers over SSH, separate processes) bypass the helper 
 
 ### Sync mechanism — `BaseAgent._sync_notifications`
 
-Three pieces of state on `BaseAgent` (`base_agent/__init__.py:366-372`):
+Three pieces of state on `BaseAgent` (`base_agent/__init__.py:421-427`):
 - `_notification_fp: tuple` — last-observed `(name, mtime_ns, size)` triple-tuple from `notification_fingerprint`. Updated only on successful sync.
 - `_notification_block_id: str | None` — `call_id` of the currently-injected wire pair, or `None` if no pair is in the wire.
+- `_notification_inject_seq: int` — monotonic injection counter so repeated notification payloads still produce unique synthetic pairs.
 
 The sync loop runs from **two trigger points**:
-1. **Heartbeat tick** (`base_agent/lifecycle.py:334`) — `agent._sync_notifications()` after `_check_rules_file`. Default cadence is the heartbeat interval (~1s); the producer's `_wake_nap` calls also nudge the heartbeat for sub-second latency.
-2. **Voluntary calls** — `system(action="notification")` (`intrinsics/system/__init__.py:97`) returns `collect_notifications(workdir)` directly. Reading is always free; the agent can poll its own notification state any time without touching the wire.
+1. **Heartbeat tick** (`base_agent/lifecycle.py:328`) — `agent._sync_notifications()` after `_check_rules_file`. Default cadence is the heartbeat interval (~1s); the producer's `_wake_nap` calls also nudge the heartbeat for sub-second latency.
+2. **Voluntary calls** — `system(action="notification")` (`intrinsics/system/__init__.py:92-94`) returns `collect_notifications(workdir)` directly. Reading is always free; the agent can poll its own notification state any time without touching the wire.
 
-`_sync_notifications` (`base_agent/__init__.py:761`):
+`_sync_notifications` (`base_agent/__init__.py:808`):
 1. Compute fingerprint. If unchanged, return (cheap path — the common case).
 2. On change, strip the prior wire pair via `interface.remove_pair_by_call_id(prior_block_id)`.
 3. If `notifications` is empty, the wire is now clean — clear any legacy pending ACTIVE-state stash defensively, commit the new (empty) fingerprint, and return.
@@ -139,7 +140,7 @@ The filesystem-as-protocol redesign collapses all four into "write a file, read 
 
 ### Voluntary `system(action="notification")` — read-your-mailbox path
 
-Beyond kernel-driven sync, agents can call `system(action="notification")` themselves. The handler (`intrinsics/system/__init__.py:97`) returns the bare `collect_notifications(workdir)` dict — no `_synthesized` envelope, since the call wasn't synthesized. Useful when the agent wants to recheck producers without waiting for the next sync tick.
+Beyond kernel-driven sync, agents can call `system(action="notification")` themselves. The handler (`intrinsics/system/__init__.py:92-94`) returns the bare `collect_notifications(workdir)` dict — no `_synthesized` envelope, since the call wasn't synthesized. Useful when the agent wants to recheck producers without waiting for the next sync tick.
 
 ### Migration window — `tc_inbox` is dormant, not deleted
 
