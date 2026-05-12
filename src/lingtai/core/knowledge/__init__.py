@@ -25,7 +25,7 @@ PROVIDERS = {"providers": [], "default": "builtin"}
 
 
 def get_description(lang: str = "en") -> str:
-    return t(lang, "library.description")
+    return t(lang, "knowledge.description")
 
 
 def get_schema(lang: str = "en") -> dict:
@@ -35,32 +35,32 @@ def get_schema(lang: str = "en") -> dict:
             "action": {
                 "type": "string",
                 "enum": ["submit", "view", "consolidate", "delete"],
-                "description": t(lang, "library.action"),
+                "description": t(lang, "knowledge.action"),
             },
             "title": {
                 "type": "string",
-                "description": t(lang, "library.title"),
+                "description": t(lang, "knowledge.title"),
             },
             "summary": {
                 "type": "string",
-                "description": t(lang, "library.summary"),
+                "description": t(lang, "knowledge.summary"),
             },
             "content": {
                 "type": "string",
-                "description": t(lang, "library.content"),
+                "description": t(lang, "knowledge.content"),
             },
             "supplementary": {
                 "type": "string",
-                "description": t(lang, "library.supplementary"),
+                "description": t(lang, "knowledge.supplementary"),
             },
             "ids": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": t(lang, "library.ids"),
+                "description": t(lang, "knowledge.ids"),
             },
             "include_supplementary": {
                 "type": "boolean",
-                "description": t(lang, "library.include_supplementary"),
+                "description": t(lang, "knowledge.include_supplementary"),
             },
         },
         "required": ["action"],
@@ -68,7 +68,7 @@ def get_schema(lang: str = "en") -> dict:
 
 
 
-class LibraryManager:
+class KnowledgeManager:
     """Durable long-term knowledge — submit, view, consolidate, delete."""
 
     DEFAULT_MAX_ENTRIES = 50
@@ -78,19 +78,14 @@ class LibraryManager:
         agent: "BaseAgent",
         *,
         knowledge_limit: int | None = None,
-        library_limit: int | None = None,
-        codex_limit: int | None = None,
     ):
         self._agent = agent
         self._working_dir = agent._working_dir
-        limit = (
-            knowledge_limit
-            if knowledge_limit is not None
-            else library_limit if library_limit is not None else codex_limit
+        self._max_entries = (
+            knowledge_limit if knowledge_limit is not None else self.DEFAULT_MAX_ENTRIES
         )
-        self._max_entries = limit if limit is not None else self.DEFAULT_MAX_ENTRIES
 
-        self._codex_json = self._working_dir / "codex" / "codex.json"
+        self._knowledge_json = self._working_dir / "knowledge" / "knowledge.json"
         self._entries: list[dict] = self._load_entries()
 
     # ------------------------------------------------------------------
@@ -101,8 +96,6 @@ class LibraryManager:
         """Inject knowledge entry index (id + title + summary) into system prompt."""
         if not self._entries:
             self._agent.update_system_prompt("knowledge", "", protected=True)
-            self._agent.update_system_prompt("library", "", protected=True)
-            self._agent.update_system_prompt("codex", "", protected=True)
             return
 
         lines = [
@@ -118,18 +111,16 @@ class LibraryManager:
         )
 
         self._agent.update_system_prompt("knowledge", "\n".join(lines), protected=True)
-        self._agent.update_system_prompt("library", "", protected=True)
-        self._agent.update_system_prompt("codex", "", protected=True)
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 
     def _load_entries(self) -> list[dict]:
-        if not self._codex_json.is_file():
+        if not self._knowledge_json.is_file():
             return []
         try:
-            data = json.loads(self._codex_json.read_text())
+            data = json.loads(self._knowledge_json.read_text())
             entries = data.get("entries", [])
             for e in entries:
                 if "title" not in e:
@@ -142,14 +133,14 @@ class LibraryManager:
 
     def _save_entries(self) -> None:
         data = {"version": 1, "entries": self._entries}
-        self._codex_json.parent.mkdir(exist_ok=True)
+        self._knowledge_json.parent.mkdir(exist_ok=True)
         fd, tmp = tempfile.mkstemp(
-            dir=str(self._codex_json.parent), suffix=".tmp",
+            dir=str(self._knowledge_json.parent), suffix=".tmp",
         )
         try:
             os.write(fd, json.dumps(data, indent=2, ensure_ascii=False).encode())
             os.close(fd)
-            os.replace(tmp, str(self._codex_json))
+            os.replace(tmp, str(self._knowledge_json))
         except Exception:
             try:
                 os.close(fd)
@@ -310,17 +301,13 @@ def setup(
     agent: "BaseAgent",
     *,
     knowledge_limit: int | None = None,
-    library_limit: int | None = None,
-    codex_limit: int | None = None,
-) -> LibraryManager:
+) -> KnowledgeManager:
     """Set up the knowledge capability — private durable knowledge."""
     lang = agent._config.language
 
-    mgr = LibraryManager(
+    mgr = KnowledgeManager(
         agent,
         knowledge_limit=knowledge_limit,
-        library_limit=library_limit,
-        codex_limit=codex_limit,
     )
 
     agent.add_tool(
@@ -329,27 +316,8 @@ def setup(
         handler=mgr.handle,
         description=get_description(lang),
     )
-    # Compatibility aliases for callers that still invoke library(...) or codex(...).
-    agent.add_tool(
-        "library",
-        schema=get_schema(lang),
-        handler=mgr.handle,
-        description="Compatibility alias for knowledge — use knowledge(...) instead. "
-        + get_description(lang),
-    )
-    agent.add_tool(
-        "codex",
-        schema=get_schema(lang),
-        handler=mgr.handle,
-        description="Deprecated alias for knowledge — use knowledge(...) instead. "
-        + get_description(lang),
-    )
-
     # Inject knowledge catalog into system prompt at boot.
     mgr._inject_catalog()
 
     return mgr
 
-
-# Back-compat import alias: old code may still import CodexManager.
-CodexManager = LibraryManager

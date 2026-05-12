@@ -215,13 +215,12 @@ def test_instantiate_skips_blacklisted_capabilities(tmp_path):
     agent = _make_agent(tmp_path, ["daemon"])
     mgr = agent.get_capability("daemon")
     schemas, handlers = mgr._instantiate_preset_capabilities(
-        {"daemon": {}, "avatar": {}, "knowledge": {}, "library": {}, "read": {}},
+        {"daemon": {}, "avatar": {}, "knowledge": {}, "read": {}},
         {"provider": "mock", "model": "mock"},
     )
     assert "daemon" not in schemas
     assert "avatar" not in schemas
     assert "knowledge" not in schemas
-    assert "library" not in schemas
     assert "read" in schemas
 
 
