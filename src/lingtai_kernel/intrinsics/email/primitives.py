@@ -83,6 +83,7 @@ def _list_inbox(agent) -> list[dict]:
             continue
         try:
             msg = json.loads(msg_file.read_text())
+            msg["_mailbox_id"] = msg_dir.name
             messages.append(msg)
         except (json.JSONDecodeError, OSError):
             continue

@@ -190,3 +190,28 @@ def test_notification_digest_includes_mailbox_id_zh(tmp_path):
     })
     body, _, _ = _render_unread_digest(agent)
     assert eid in body
+
+def test_notification_digest_prefers_directory_mailbox_id_over_stale_payload(tmp_path):
+    """Digest IDs come from the mailbox directory, not a stale JSON field.
+
+    The filesystem directory is the lookup key that email(action="read"|"dismiss")
+    accepts. If a copied or externally written message carries an old
+    ``_mailbox_id`` inside ``message.json``, the notification digest must still
+    expose the real directory id.
+    """
+    agent = _make_agent(tmp_path)
+    real_id = _persist_inbox(tmp_path, {
+        "from": "alice",
+        "subject": "ping",
+        "message": "hello",
+        "received_at": "2026-05-04T08:00:00Z",
+    })
+    msg_file = tmp_path / "mailbox" / "inbox" / real_id / "message.json"
+    msg = json.loads(msg_file.read_text())
+    msg["_mailbox_id"] = "phantom-id-zzzz"
+    msg_file.write_text(json.dumps(msg, indent=2))
+
+    body, _, _ = _render_unread_digest(agent)
+
+    assert real_id in body
+    assert "phantom-id-zzzz" not in body
