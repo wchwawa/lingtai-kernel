@@ -49,3 +49,33 @@ Pass `<distribution name>` to `find_readme.py`. Pass `<module name>` to `find_re
 ## After it's running
 
 Inbound events (new emails, chat messages) flow into your `.mcp_inbox/<name>/` via the LICC v1 inbox callback contract — the kernel auto-injects them into your next turn as `[system]` messages. You don't poll; the kernel does. Outbound calls go through the omnibus tool: `imap(action="send", ...)`, `telegram(action="send_message", ...)`, etc. — see each addon's README for the action list.
+
+## WeChat setup checklist
+
+WeChat has unique pitfalls that catch agents off-guard. Walk this checklist on every new WeChat setup to avoid wasting the human's time:
+
+1. **Install into LingTai's runtime venv** — the `lingtai-wechat-bootstrap` script lives inside the venv, not on the system PATH:
+   ```bash
+   ~/.lingtai-tui/runtime/venv/bin/pip install git+https://github.com/Lingtai-AI/lingtai-wechat.git
+   ```
+
+2. **Run bootstrap with the full venv path** from the project root:
+   ```bash
+   ~/.lingtai-tui/runtime/venv/bin/lingtai-wechat-bootstrap .secrets/wechat
+   ```
+
+3. **No manual credential copy needed** — the MCP resolves `LINGTAI_WECHAT_CONFIG` relative to the project root (the parent of `.lingtai/`), so `.secrets/wechat/config.json` works from both bootstrap and the MCP. Credentials are written next to `config.json`.
+
+4. **WSL users**: bootstrap auto-detects WSL and uses `cmd.exe /c start` or `wslview` to open the browser. If neither works, it prints the HTML file path for manual opening.
+
+5. **Refresh the MCP** after bootstrap writes credentials:
+   ```
+   system(action="refresh")
+   ```
+
+6. **Test the connection**:
+   ```
+   wechat(action="check")
+   ```
+
+7. **Session expiry** — WeChat sessions expire (~30 days). When expired, a LICC event with `metadata.event_type: "session_expired"` arrives. Re-run the bootstrap to re-authenticate.
