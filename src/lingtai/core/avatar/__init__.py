@@ -114,11 +114,6 @@ def get_schema(lang: str = "en") -> dict:
                 "type": "boolean",
                 "description": t(lang, "avatar.confirm"),
             },
-            "backend": {
-                "type": "string",
-                "enum": ["lingtai", "claude-code"],
-                "description": "Runtime backend for the avatar. 'lingtai' (default) spawns a lingtai agent. 'claude-code' spawns a Claude Code session as a LingTai node.",
-            },
         },
         "allOf": [
             {
@@ -189,7 +184,6 @@ class AvatarManager:
         avatar_type = args.get("type", "shallow")
         dry_run = bool(args.get("dry_run", False))
         confirm = bool(args.get("confirm", False))
-        backend = args.get("backend", "lingtai")
 
         if peer_name is None:
             return {"error": "name is required — pick a true name (真名) for the 他我 (e.g. 'researcher', '学者')"}
@@ -283,7 +277,6 @@ class AvatarManager:
                 "preview": {
                     "name": peer_name,
                     "type": avatar_type,
-                    "backend": backend,
                     "working_dir": str(avatar_working_dir),
                     "address": avatar_working_dir.name,
                     "mission": preview_mission,
@@ -605,117 +598,6 @@ class AvatarManager:
 
         # Explicitly do NOT copy: history/, mailbox/, delegates/,
         # .agent.json, .agent.heartbeat, logs/
-
-    # ------------------------------------------------------------------
-    # Claude Code backend
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _prepare_claude_code_node(
-        node_dir: Path,
-        name: str,
-        *,
-        mission: str = "",
-        parent_name: str = "",
-    ) -> None:
-        """Provision a Claude Code node directory.
-
-        Creates the lingtai-node contract structure:
-        - CLAUDE.md (identity)
-        - memory.md (working memory)
-        - handover.md (pre-compact letter template)
-        - mailbox/{inbox,sent,archive}/
-        - .agent.json (metadata)
-        """
-        from datetime import datetime, timezone
-
-        node_dir.mkdir(parents=True, exist_ok=True)
-
-        # Mailbox structure
-        for sub in ("inbox", "sent", "archive"):
-            (node_dir / "mailbox" / sub).mkdir(parents=True, exist_ok=True)
-
-        # .agent.json
-        agent_meta = {
-            "name": name,
-            "runtime": "claude-code",
-            "contract_version": "2.0.0",
-            "spawned_by": parent_name,
-            "spawned_at": datetime.now(timezone.utc).isoformat(),
-        }
-        (node_dir / ".agent.json").write_text(
-            json.dumps(agent_meta, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-        # CLAUDE.md — identity file
-        claude_md = node_dir / "CLAUDE.md"
-        if not claude_md.is_file():
-            claude_md.write_text(
-                f"# {name}\n\n"
-                f"You are a LingTai network node running on the Claude Code runtime.\n"
-                f"Your name is **{name}**. Your parent is **{parent_name}**.\n\n"
-                f"## Communication\n\n"
-                f"You communicate via files in the `mailbox/` directory.\n"
-                f"Check for new messages by reading `mailbox/inbox/*/message.json`.\n"
-                f"Send messages by writing to `mailbox/outbox/<uuid>/message.json`.\n\n"
-                f"## Pre-Compact Ritual\n\n"
-                f"Before context compaction, save your state:\n"
-                f"1. Update this file (CLAUDE.md) if your identity evolved\n"
-                f"2. Rewrite memory.md with your current working state\n"
-                f"3. Write handover.md — a letter to the next self\n\n",
-                encoding="utf-8",
-            )
-
-        # memory.md — working memory
-        memory_md = node_dir / "memory.md"
-        if not memory_md.is_file():
-            memory_md.write_text(
-                f"# Memory — Working State\n\n"
-                f"## Current Task\n\n{mission or '(no mission yet)'}\n\n"
-                f"## Notes\n\n*(scratch space)*\n\n"
-                f"## Last Updated\n\n*(not yet)*\n",
-                encoding="utf-8",
-            )
-
-        # handover.md — pre-compact letter template
-        handover_md = node_dir / "handover.md"
-        if not handover_md.is_file():
-            handover_md.write_text(
-                "# Handover — Letter to the Next Self\n\n"
-                "## What I Was Doing\n\n"
-                "## What I Learned\n\n"
-                "## What's Next\n\n"
-                "## What to Watch Out For\n\n"
-                "---\n"
-                f"*Written: (not yet)*\n",
-                encoding="utf-8",
-            )
-
-    @staticmethod
-    def _launch_claude_code(working_dir: Path, mission: str) -> tuple[subprocess.Popen, Path]:
-        """Launch `claude -p <mission>` in a Claude Code node directory.
-
-        This is the simplest possible launch — runs Claude Code in non-interactive
-        mode with the mission as the initial prompt. For ongoing communication,
-        a watcher should be used instead (future enhancement).
-        """
-        logs_dir = working_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        stderr_path = logs_dir / "spawn.stderr"
-        stderr_fh = stderr_path.open("wb")
-        try:
-            proc = subprocess.Popen(
-                ["claude", "-p", mission, "--dangerously-skip-permissions"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_fh,
-                cwd=str(working_dir),
-                start_new_session=True,
-            )
-        finally:
-            stderr_fh.close()
-        return proc, stderr_path
 
     # ------------------------------------------------------------------
     # Process launch
