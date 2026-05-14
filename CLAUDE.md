@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Always work in a worktree, never directly in the main checkout
+
+For any non-trivial change (anything beyond a single-line typo fix), create a git worktree first and do the work there. This repo has many concurrent feature branches and stashed WIPs; editing the main checkout has repeatedly led to:
+
+- branch switches reverting in-flight edits before they can be committed
+- mixed-author dirty trees getting accidentally committed together
+- losing several minutes of work to a `git reset --hard` from a parallel session
+
+The convention here is `.worktrees/<slug>/` on a fresh branch off `origin/main`. Examples already on disk include `.worktrees/imap-hardening`, `.worktrees/issue73-preset-confirmation`, `.worktrees/release-0.9.7`. Use the same pattern:
+
+```bash
+cd ~/Documents/GitHub/lingtai-kernel
+git fetch origin main
+git worktree add -b <branch-slug> .worktrees/<slug> origin/main
+cd .worktrees/<slug>
+# ... edit, smoke test, pytest, commit, push ...
+```
+
+When the work is merged (or abandoned), clean up:
+
+```bash
+git worktree remove .worktrees/<slug>
+git branch -d <branch-slug>     # or -D if abandoned
+```
+
+**Hard rule:** if you find yourself about to make more than ~10 lines of edits in the main checkout (the one at `~/Documents/GitHub/lingtai-kernel/`), stop and move the work to a worktree first. The 30 seconds spent setting one up are recouped many times over the first time a parallel session resets the branch out from under you.
+
+Single-line fixes, doc tweaks, or commits that are already staged from prior work can stay in the main checkout — the rule is about multi-step editing sessions.
+
 ## What is 灵台
 
 灵台 (Língtái) is a generic agent framework — an "agent operating system" providing the minimal kernel for AI agents: thinking (LLM), perceiving (vision, search), acting (file I/O), and communicating (inter-agent email). Domain tools, coordination, and orchestration are plugged in from outside via MCP-compatible interfaces.
