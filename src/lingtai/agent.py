@@ -1066,7 +1066,7 @@ class Agent(BaseAgent):
         # AgentConfig fields.
         self._config = AgentConfig(
             stamina=m.get("stamina", 86400.0),
-            soul_delay=soul.get("delay", 7200.0),
+            soul_delay=soul.get("delay", 99999.0),
             consultation_past_count=soul.get("consultation_past_count", 2),
             soul_voice=soul.get("voice", "inner"),
             soul_voice_prompt=soul.get("voice_prompt", ""),
