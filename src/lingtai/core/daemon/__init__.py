@@ -39,11 +39,16 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
     that its PGID equals its own PID.  Sends SIGTERM to the group, waits up
     to 5 seconds, then escalates to SIGKILL for any survivors.
 
+    Uses ``proc.pid`` directly as the PGID (since ``start_new_session=True``
+    guarantees PGID == PID) to avoid a ``getpgid`` round-trip that could
+    race with PID recycling.
+
     Silently ignores ``ProcessLookupError`` (process already dead) and
     ``OSError`` (permission denied on already-dead group).
     """
+    # start_new_session=True guarantees pgid == pid
+    pgid = proc.pid
     try:
-        pgid = os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, OSError):
         pass
@@ -51,7 +56,6 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            pgid = os.getpgid(proc.pid)
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
@@ -206,8 +210,10 @@ class DaemonManager:
         self._next_id = 1
         # Pool tracking for reclaim
         self._pools: list[tuple[ThreadPoolExecutor, threading.Event]] = []
-        # CLI process tracking for direct process-group kill on reclaim/timeout
+        # CLI process tracking for direct process-group kill on reclaim/timeout.
+        # Guarded by _cli_lock — accessed from pool workers, watchdog, and reclaim.
         self._cli_procs: list[subprocess.Popen] = []
+        self._cli_lock = threading.Lock()
 
     def handle(self, args: dict) -> dict:
         action = args.get("action")
@@ -651,7 +657,8 @@ class DaemonManager:
             exc = RuntimeError(f"Failed to start claude CLI: {e}")
             run_dir.mark_failed(exc)
             raise exc
-        self._cli_procs.append(proc)
+        with self._cli_lock:
+            self._cli_procs.append(proc)
 
         # Drain stderr in a background thread so diagnostic messages reach
         # the run dir even while the main thread is parsing stdout events.
@@ -796,6 +803,12 @@ class DaemonManager:
             # Give the stderr drainer a moment to finish reading any
             # remaining bytes before the pipe closes on us.
             stderr_thread.join(timeout=2.0)
+            # Remove from tracked procs to prevent PID recycling issues
+            with self._cli_lock:
+                try:
+                    self._cli_procs.remove(proc)
+                except ValueError:
+                    pass  # already removed by reclaim/watchdog
 
         stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
 
@@ -899,7 +912,8 @@ class DaemonManager:
             exc = RuntimeError(f"Failed to start codex CLI: {e}")
             run_dir.mark_failed(exc)
             raise exc
-        self._cli_procs.append(proc)
+        with self._cli_lock:
+            self._cli_procs.append(proc)
 
         stderr_lines: list[str] = []
 
@@ -983,6 +997,12 @@ class DaemonManager:
             raise
         finally:
             stderr_thread.join(timeout=2.0)
+            # Remove from tracked procs to prevent PID recycling issues
+            with self._cli_lock:
+                try:
+                    self._cli_procs.remove(proc)
+                except ValueError:
+                    pass  # already removed by reclaim/watchdog
 
         stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
 
@@ -1793,9 +1813,12 @@ class DaemonManager:
                         if not e["future"].done())
         # Kill all tracked CLI process groups first — this terminates child
         # shells/tools that cancel_event alone cannot reach (GH #122).
-        for proc in self._cli_procs:
+        # Snapshot under lock, kill outside to avoid holding lock during wait.
+        with self._cli_lock:
+            procs_to_kill = list(self._cli_procs)
+            self._cli_procs.clear()
+        for proc in procs_to_kill:
             _kill_process_group(proc)
-        self._cli_procs.clear()
         for pool, cancel in self._pools:
             cancel.set()
             pool.shutdown(wait=False, cancel_futures=True)
@@ -1851,13 +1874,16 @@ class DaemonManager:
                 return
             time.sleep(1.0)
         timeout_event.set()
+        cancel_event.set()
         # Kill CLI process groups directly — the run loop may be blocked
         # reading stdout from a long child command and cannot check
         # cancel_event until that command finishes.
-        for proc in self._cli_procs:
+        # Snapshot under lock, kill outside to avoid holding lock during wait.
+        with self._cli_lock:
+            procs_to_kill = list(self._cli_procs)
+            self._cli_procs.clear()
+        for proc in procs_to_kill:
             _kill_process_group(proc)
-        self._cli_procs.clear()
-        cancel_event.set()
 
     def _log(self, event_type: str, **fields) -> None:
         """Log through the parent agent's logging system."""
