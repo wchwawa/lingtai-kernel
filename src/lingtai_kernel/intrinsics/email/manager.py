@@ -827,8 +827,11 @@ class EmailManager:
         to clear the notification entry for a list of IDs.
 
         Returns ``{"status": "ok", "dismissed": [...]}`` with the IDs
-        actually marked.  Non-inbox or missing IDs go into
-        ``not_found`` so the caller can detect partial failures.
+        actually marked read.  IDs for emails that exist but were
+        already handled (read, archived, deleted) go into
+        ``already_handled`` — this is normal when the notification
+        digest is stale.  IDs that never existed go into
+        ``not_found``.
         """
         ids = args.get("email_id", [])
         if isinstance(ids, str):
@@ -837,11 +840,23 @@ class EmailManager:
             return {"error": "email_id is required"}
 
         dismissed: list[str] = []
+        already_handled: list[str] = []
         not_found: list[str] = []
         for eid in ids:
             data = self._load_email(eid)
-            if data is None or data.get("_folder") != "inbox":
+            if data is None:
+                # Email never existed — genuine not_found
                 not_found.append(eid)
+                continue
+            if data.get("_folder") != "inbox":
+                # Email exists but is no longer in inbox (archived, etc.)
+                # This is normal when the notification digest is stale.
+                already_handled.append(eid)
+                continue
+            if eid in _read_ids(self._agent):
+                # Email is in inbox but already read — nothing to do,
+                # but not an error either.
+                already_handled.append(eid)
                 continue
             _mark_read(self._agent, eid)
             dismissed.append(eid)
@@ -850,6 +865,8 @@ class EmailManager:
             self._rerender_unread_digest()
 
         result: dict = {"status": "ok", "dismissed": dismissed}
+        if already_handled:
+            result["already_handled"] = already_handled
         if not_found:
             result["not_found"] = not_found
             result["hint"] = ("not_found IDs were likely already read, dismissed, "
