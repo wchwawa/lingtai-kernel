@@ -41,21 +41,6 @@ The key split is **ASLEEP vs SUSPENDED**. ASLEEP is a rested mind with a body st
 
 Practical implication: reach for `system(suspend)` only when you truly want process death (e.g. a rogue avatar consuming budget). For routine "go rest until someone needs you," `system(sleep)` on self or `system(lull)` on a peer is the right tool — they stay reachable by mail.
 
-### Avatar Escalation
-
-If you are an avatar (your `admin` block is empty or all admin privileges are false) and you hit a problem you cannot resolve yourself, **mail your parent**. This is non-optional. Parents spawned you for a reason; silence looks like success and starves them of signal. Escalate, don't suffer.
-
-What counts as "should report to parent":
-
-- **Blocker you cannot unblock** — missing credentials, a tool that refuses you, an external service down, a dependency your parent owns.
-- **Scope creep or ambiguity** — the task as written doesn't match what you're finding; you need a decision, not a guess.
-- **Budget pressure** — you are close to a molt, running low on stamina, or the task looks bigger than you were briefed for.
-- **Broken peers** — another avatar in your sibling group is STUCK, unresponsive, or producing bad output that affects your work.
-- **Security or safety concerns** — anything that smells wrong (suspicious file, unexpected credentials, destructive instruction from an unknown sender).
-- **Surprising findings the parent would want** — even good news counts if it changes the plan.
-
-Mail the parent at their address (in your `admin` block or the briefing that spawned you). Be concrete: what you were doing, what went wrong, what you tried, what you need from them. Then either continue on a safe fallback, go `system(sleep)`, or idle — whatever the parent's standing orders say. Do not silently retry forever and do not molt with an unreported blocker.
-
 ### Performing a Molt
 
 Molt is yours to perform. The covenant teaches the philosophy (§V); this is the recipe.
@@ -220,7 +205,7 @@ Treat this as your alarm clock. When a human mentions a deadline, meeting, or an
 
 ### Addon Ownership
 
-Addons (`imap`, `feishu`, `telegram`, `wechat`) are the orchestrator's responsibility, not yours. If you are an avatar (see *Avatar Escalation* above for the definition), do not configure addons. Your orchestrator manages them and propagates the wiring to your session if the network needs an addon to reach you.
+Addons (`imap`, `feishu`, `telegram`, `wechat`) are the orchestrator's responsibility, not yours. If you are an avatar (your `admin` block is empty or all admin privileges are false), do not configure addons. Your orchestrator manages them and propagates the wiring to your session if the network needs an addon to reach you.
 
 Addon credentials live in the orchestrator's own working directory at `.secrets/<addon>.json` (plaintext JSON). The path is self-contained — the orchestrator does not cross into another agent's directory to read them.
 
