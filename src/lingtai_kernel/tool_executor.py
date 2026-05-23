@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Callable
 
 from .llm.base import ToolCall
@@ -14,6 +15,10 @@ from .secondary_tools import (
     SECONDARY_ALLOWED_TOOLS,
     SECONDARY_EXCLUDED_PRIMARY_TOOLS,
     SECONDARY_READ_RESULT_MAX_BYTES,
+)
+from .tool_result_artifacts import (
+    PREVENTIVE_MAX_CHARS as _DEFAULT_MAX_RESULT_CHARS,
+    spill_oversized_result as _spill_oversized_result,
 )
 from .tool_timing import ToolTimer
 from .types import UnknownToolError
@@ -70,7 +75,9 @@ def _contains_secondary_key(value: Any) -> bool:
         return any(_contains_secondary_key(item) for item in value)
     return False
 
-# Default max tool result size: 50 KB.
+# Default max tool result size: 50 KB.  Used only by the secondary-summary
+# path (`_secondary_summary`); the primary tool-result path is now bounded
+# by the 10K spill in `tool_result_artifacts.py`.
 _DEFAULT_MAX_RESULT_BYTES = 50_000
 
 
@@ -121,6 +128,8 @@ class ToolExecutor:
         logger_fn: Callable | None = None,
         max_result_bytes: int = _DEFAULT_MAX_RESULT_BYTES,
         meta_fn: Callable[[], dict] | None = None,
+        working_dir: Path | str | None = None,
+        max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
     ) -> None:
         self._dispatch_fn = dispatch_fn
         self._make_tool_result_fn = make_tool_result_fn
@@ -130,6 +139,48 @@ class ToolExecutor:
         self._logger_fn = logger_fn
         self._max_result_bytes = max_result_bytes
         self._meta_fn = meta_fn or (lambda: {})
+        self._working_dir = Path(working_dir) if working_dir is not None else None
+        self._max_result_chars = max_result_chars
+
+    def _build_result_message(
+        self,
+        tool_name: str,
+        result: Any,
+        *,
+        tool_call_id: str | None,
+    ) -> Any:
+        """Final boundary before a result reaches the LLM wire.
+
+        Applies the unified character cap (``_DEFAULT_MAX_RESULT_CHARS``):
+        results that serialize beyond the cap are spilled to a sidecar
+        artifact under ``<workdir>/tmp/tool-results/`` and replaced with a
+        compact manifest pointing at the file.  The artifact stores the
+        *full* post-dispatch result — the legacy 50KB lossy
+        ``_truncate_result`` step is intentionally skipped upstream of this
+        method on the primary success and parallel paths.  Notification
+        pairs do not pass through this method — they are synthesized
+        directly by ``BaseAgent._inject_notifications`` and bypass
+        ``ToolExecutor``.
+        """
+        capped = _spill_oversized_result(
+            result,
+            max_chars=self._max_result_chars,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            working_dir=self._working_dir,
+        )
+        if capped is not result and self._logger_fn is not None:
+            try:
+                self._logger_fn(
+                    "tool_result_spilled",
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    original_char_count=capped.get("original_char_count"),
+                    spill_path=capped.get("spill_path"),
+                )
+            except Exception:
+                pass
+        return self._make_tool_result_fn(tool_name, capped, tool_call_id=tool_call_id)
 
     def _validate_secondary(self, secondary: Any) -> tuple[str | None, dict | None, dict | None]:
         """Validate a nested secondary spec.
@@ -384,7 +435,7 @@ class ToolExecutor:
                 "_duplicate_warning": verdict.warning,
                 "message": f"Execution skipped — duplicate call #{verdict.count}",
             }
-            msg = self._make_tool_result_fn(tc.name, result, tool_call_id=tc_id)
+            msg = self._build_result_message(tc.name, result, tool_call_id=tc_id)
             self._log(
                 "tool_result",
                 tool_name=tc.name,
@@ -416,7 +467,14 @@ class ToolExecutor:
                     ToolCall(name=tc.name, args=args, id=tc_id)
                 )
 
-            result = _truncate_result(result, self._max_result_bytes)
+            # NOTE: the legacy 50KB lossy `_truncate_result` step used to run
+            # here. It is now skipped on the primary path because the unified
+            # 10K spill boundary (`_build_result_message` →
+            # `_spill_oversized_result`) preserves the full original by
+            # writing it to a sidecar artifact instead of mutating it
+            # in-place. `_truncate_result` is still used by the secondary
+            # summary (`_secondary_summary`) where the bounded forward is
+            # intentional.
             result = _attach_secondary_result(result, secondary_summary)
 
             if isinstance(result, dict):
@@ -438,10 +496,10 @@ class ToolExecutor:
 
             if isinstance(result, dict) and result.get("intercept"):
                 intercept_text = result.get("text", "")
-                result_msg = self._make_tool_result_fn(tc.name, result, tool_call_id=tc_id)
+                result_msg = self._build_result_message(tc.name, result, tool_call_id=tc_id)
                 return result_msg, True, intercept_text
 
-            result_msg = self._make_tool_result_fn(tc.name, result, tool_call_id=tc_id)
+            result_msg = self._build_result_message(tc.name, result, tool_call_id=tc_id)
 
             if isinstance(result, dict) and result.get("status") == "error":
                 err_msg = result.get("message", "unknown error")
@@ -459,7 +517,7 @@ class ToolExecutor:
             if secondary_summary is not None:
                 _attach_secondary_result(err_result, secondary_summary)
             stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
-            result_msg = self._make_tool_result_fn(tc.name, err_result, tool_call_id=tc_id)
+            result_msg = self._build_result_message(tc.name, err_result, tool_call_id=tc_id)
             collected_errors.append(f"{tc.name}: {e}")
             self._log(
                 "tool_result",
@@ -526,7 +584,7 @@ class ToolExecutor:
                     "_duplicate_warning": verdict.warning,
                     "message": f"Execution skipped — duplicate call #{verdict.count}",
                 }
-                tool_results.append((i, self._make_tool_result_fn(
+                tool_results.append((i, self._build_result_message(
                     tc.name, result, tool_call_id=tc_id,
                 )))
                 self._log(
@@ -549,7 +607,7 @@ class ToolExecutor:
                 result = {"status": "error", "message": str(UnknownToolError(tc.name))}
                 _attach_secondary_result(result, secondary_summary)
                 stamp_meta(result, self._meta_fn(), 0)
-                tool_results.append((i, self._make_tool_result_fn(
+                tool_results.append((i, self._build_result_message(
                     tc.name, result, tool_call_id=tc_id,
                 )))
                 collected_errors.append(f"{tc.name}: {result['message']}")
@@ -605,7 +663,8 @@ class ToolExecutor:
                     exception_message=str(e),
                 )
                 return index, err_result
-            result = _truncate_result(result, self._max_result_bytes)
+            # See sequential path: the lossy 50KB step is intentionally
+            # skipped now that the spill boundary preserves full content.
             result = _attach_secondary_result(result, secondary_summary)
             if isinstance(result, dict):
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
@@ -677,7 +736,7 @@ class ToolExecutor:
             tc_id = getattr(tc, "id", None)
             if i in results_map:
                 result = results_map[i]
-                tool_results.append((i, self._make_tool_result_fn(
+                tool_results.append((i, self._build_result_message(
                     tc.name, result, tool_call_id=tc_id,
                 )))
                 if isinstance(result, dict) and result.get("status") == "error":
@@ -695,7 +754,7 @@ class ToolExecutor:
                 err_result = {"status": "error", "message": err_msg}
                 _attach_secondary_result(err_result, secondary_summary)
                 stamp_meta(err_result, self._meta_fn(), 0)
-                tool_results.append((i, self._make_tool_result_fn(
+                tool_results.append((i, self._build_result_message(
                     tc.name, err_result, tool_call_id=tc_id,
                 )))
                 collected_errors.append(f"{tc.name}: {err_msg}")
