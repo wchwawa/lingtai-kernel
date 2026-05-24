@@ -889,9 +889,11 @@ class BaseAgent:
             # would refuse the append to preserve alternation. Heal the
             # wire first by closing those pending calls with synthetic
             # error results, then retry. If injection STILL fails after
-            # healing, revert state to ASLEEP so the inbox doesn't
-            # deadlock in IDLE with no MSG_TC_WAKE pending — the next
-            # heartbeat tick will see the same fingerprint and retry.
+            # healing, fall through to the degraded path below: stay
+            # IDLE, deliver a degraded `MSG_REQUEST` that points the
+            # agent at the recovery handles, and commit the fingerprint
+            # so the same failure does not replay until on-disk state
+            # changes.
             self._asleep.clear()
             self._cancel_event.clear()
             self._set_state(AgentState.IDLE, reason="notification_arrival")
@@ -914,15 +916,37 @@ class BaseAgent:
                 except Exception:
                     pass
             else:
-                # Could not inject even after healing — revert to ASLEEP
-                # so state reflects reality. Without this, the agent
-                # would sit in IDLE with no wake message and the run
-                # loop would block on inbox.get() indefinitely.
-                self._asleep.set()
-                self._set_state(
-                    AgentState.ASLEEP,
-                    reason="wake_aborted_inject_failed",
+                # Could not inject even after healing. Reverting to ASLEEP
+                # without committing the fingerprint produced a livelock:
+                # the next heartbeat tick saw the same .notification/
+                # state, woke us again, failed inject again, reverted
+                # again — forever (Jason's MCP/WeChat wake report).
+                # Instead, stay IDLE and deliver a degraded MSG_REQUEST
+                # that explains the situation and tells the agent how to
+                # read the notification state directly. Commit the
+                # fingerprint so the same failure does not replay.
+                sources = sorted(notifications.keys())
+                from ..message import _make_message, MSG_REQUEST
+                degraded_text = (
+                    "[system] Notification delivery could not be injected onto "
+                    f"the wire after a heal attempt. Affected source(s): "
+                    f"{', '.join(sources)}. Please query the current state by "
+                    "calling system(action=\"notification\") or read the "
+                    "producer files under .notification/ directly, then decide "
+                    "whether to act. The kernel will not retry this delivery "
+                    "until the on-disk state changes."
                 )
+                try:
+                    self.inbox.put(_make_message(MSG_REQUEST, "system", degraded_text))
+                    self._wake_nap("notification_arrival_degraded")
+                except Exception:
+                    pass
+                self._log(
+                    "notification_wake_degraded",
+                    reason="inject_failed_after_heal",
+                    sources=sources,
+                )
+                self._notification_fp = fp
 
         elif self._state == AgentState.IDLE:
             # Skeletonize + reinject AND post MSG_TC_WAKE.  IDLE is
