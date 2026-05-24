@@ -1205,6 +1205,152 @@ def test_sync_asleep_no_change_stays_asleep(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# §13.4.bis — ASLEEP wake when injection still fails after heal (degraded path)
+# ---------------------------------------------------------------------------
+
+
+def _make_asleep_inject_fail_agent(tmp_path: Path, chat, state_history):
+    """Build an ASLEEP stub agent whose `_inject_notification_pair`
+    always returns False — simulating a wire that cannot accept the
+    synthetic pair even after `_heal_pending_tool_calls`."""
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.state import AgentState
+
+    class _Agent(BaseAgent):
+        def __init__(self, workdir):
+            self._working_dir = workdir
+            self._state = AgentState.ASLEEP
+            self._notification_fp = ()
+            self._notification_block_id = None
+            self._pending_notification_meta = None
+            self._chat_stub = chat
+            self._logs = []
+            self.agent_name = "stub"
+            import queue
+            self.inbox = queue.Queue()
+            self._asleep = threading.Event()
+            self._asleep.set()
+            self._cancel_event = threading.Event()
+            self.inject_calls = 0
+            self.heal_calls = 0
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _save_chat_history(self, *, ledger_source="main"):
+            pass
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+        def _wake_nap(self, *_a, **_kw):
+            pass
+
+        def _set_state(self, new_state, reason=""):
+            self._state = new_state
+            state_history.append((new_state, reason))
+
+        def _reset_uptime(self):
+            pass
+
+        def _inject_notification_pair(self, notifications):
+            self.inject_calls += 1
+            return False
+
+        def _heal_pending_tool_calls(self, *, reason):
+            self.heal_calls += 1
+            return False
+
+    return _Agent(tmp_path)
+
+
+def test_sync_asleep_inject_fail_falls_back_to_degraded_request(tmp_path: Path) -> None:
+    """ASLEEP + inject keeps failing after heal → degraded MSG_REQUEST,
+    state IDLE (not ASLEEP), fingerprint committed, log emitted.
+
+    Regression for Jason's livelock report: the prior behavior reverted
+    to ASLEEP without committing the fingerprint, so the next heartbeat
+    saw the same .notification/ state, woke again, failed inject again,
+    reverted again — forever. The fix wakes the agent via a degraded
+    request that tells it to call system(action="notification") or
+    read the producer files directly.
+    """
+    from lingtai_kernel.state import AgentState
+    from lingtai_kernel.message import MSG_REQUEST, MSG_TC_WAKE
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    chat = _make_chat_stub()
+    state_history: list = []
+    agent = _make_asleep_inject_fail_agent(tmp_path, chat, state_history)
+
+    publish(tmp_path, "mcp.wechat", {"data": {"count": 2}})
+    fp_before = notification_fingerprint(tmp_path)
+
+    agent._sync_notifications()
+
+    # State stays IDLE (not reverted to ASLEEP) so run loop can run.
+    assert agent._state == AgentState.IDLE
+    assert AgentState.IDLE in [s for s, _ in state_history]
+    assert AgentState.ASLEEP not in [s for s, _ in state_history if s == AgentState.ASLEEP and _ != "notification_arrival"]
+
+    # Inbox got a degraded MSG_REQUEST (not MSG_TC_WAKE).
+    msg = agent.inbox.get_nowait()
+    assert msg.type == MSG_REQUEST
+    assert msg.type != MSG_TC_WAKE
+    # Content mentions the failure and tells the agent how to recover.
+    assert "notification" in msg.content.lower()
+    assert "mcp.wechat" in msg.content
+    # The body should point at the recovery handles.
+    assert ("system" in msg.content) or ("producer" in msg.content.lower())
+
+    # Fingerprint committed so the same failure does not replay.
+    assert agent._notification_fp == fp_before
+    assert agent._notification_fp != ()
+
+    # Clear, single log event for diagnostics.
+    degraded_logs = [f for evt, f in agent._logs if evt == "notification_wake_degraded"]
+    assert len(degraded_logs) == 1
+    log_fields = degraded_logs[0]
+    assert log_fields.get("reason")
+    assert "mcp.wechat" in log_fields.get("sources", [])
+
+    # Heal was tried; inject was tried twice (initial + post-heal).
+    assert agent.heal_calls == 1
+    assert agent.inject_calls == 2
+
+
+def test_sync_asleep_inject_fail_does_not_replay_on_second_sync(tmp_path: Path) -> None:
+    """After the degraded path commits the fingerprint, a second sync
+    with the same on-disk state must be a complete no-op — no extra
+    inject attempts, no extra inbox messages, no extra log entries."""
+    from lingtai_kernel.state import AgentState
+
+    chat = _make_chat_stub()
+    state_history: list = []
+    agent = _make_asleep_inject_fail_agent(tmp_path, chat, state_history)
+
+    publish(tmp_path, "mcp.wechat", {"data": {"count": 1}})
+    agent._sync_notifications()
+
+    inject_calls_after_first = agent.inject_calls
+    inbox_size_after_first = agent.inbox.qsize()
+    degraded_logs_after_first = sum(
+        1 for evt, _ in agent._logs if evt == "notification_wake_degraded"
+    )
+
+    # Second sync — same fingerprint, must short-circuit.
+    agent._sync_notifications()
+
+    assert agent.inject_calls == inject_calls_after_first
+    assert agent.inbox.qsize() == inbox_size_after_first
+    degraded_logs_after_second = sum(
+        1 for evt, _ in agent._logs if evt == "notification_wake_degraded"
+    )
+    assert degraded_logs_after_second == degraded_logs_after_first
+
+
+# ---------------------------------------------------------------------------
 # §13.8 — wire-drive contract: session.send(None) means "continue from wire"
 # ---------------------------------------------------------------------------
 
