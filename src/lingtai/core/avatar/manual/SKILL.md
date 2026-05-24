@@ -130,3 +130,34 @@ Example:
 Always report findings via email.
 Do not spawn more than 3 avatars.
 ```
+
+## Cleanup / Footprint
+
+Avatars leave independent agent directories under the `.lingtai/` network plus
+parent-side delegation records such as `delegates/ledger.jsonl`. These are lives,
+not cache files. Do not delete an avatar directory directly unless the user has
+explicitly approved retiring that avatar and you have captured any handoff,
+knowledge, or files worth preserving. Prefer lifecycle tools (`lull`, `suspend`,
+`nirvana` when appropriate and authorized) over filesystem deletion.
+
+Footprint check (read-only, records the audit from the parent agent directory):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd(); network = agent.parent if agent.parent.name == ".lingtai" else agent / ".lingtai"
+avatars = [p for p in network.iterdir() if p.is_dir() and (p / ".agent.json").exists()] if network.is_dir() else []
+def size(p): return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for p in avatars]
+total = sum(s for _, s in rows)
+print(f"agent dirs: {len(rows)}; bytes: {total}")
+for p, s in sorted(rows, key=lambda r: r[1], reverse=True): print(f"{s:>12}  {p.name}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "avatar", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "avatar network footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: after spawning new specialists, before pruning a network,
+and monthly for busy orchestrators. Any destructive cleanup requires explicit
+user consent after a dry-run list of avatars and sizes.

@@ -103,6 +103,23 @@ Example: `tags: [python, physics, mhd, solver]`. Tags are best-effort metadata, 
 
 After writing, call `system({"action": "refresh"})` so the skills capability rescans and re-injects the catalog.
 
+
+### Cleanup / Footprint contract for tool manuals
+
+Every tool/capability manual that owns persistent state must include a `Cleanup / Footprint` section. This is a contract, not a janitor: the section teaches agents what the tool leaves behind and how to audit it safely.
+
+Minimum requirements:
+
+- list concrete files/directories/caches/logs the tool creates;
+- say what must never be deleted blindly;
+- provide a read-only footprint check script or command;
+- recommend an audit/cleanup cadence;
+- require a dry-run report plus explicit user consent before destructive cleanup;
+- append a cleanup/audit record to `logs/cleanup.jsonl` after the script runs;
+- guide agents who read the manual for setup/troubleshooting/long-running work to self-audit the footprint.
+
+The full template and consent rule live in `reference/cleanup-footprint-contract.md`.
+
 ### Starting from the template
 
 If you'd rather not start from a blank file, copy the bundled template:
@@ -255,3 +272,33 @@ If a custom skill is worth sharing outside the network — with humans, external
 Do NOT `git init` inside `.library/custom/` directly — it is a subtree of your agent working directory and you would entangle two repos. Always copy out first.
 
 Once published, agents elsewhere can install it with `git clone` into their `.library/custom/` and call `system({"action": "refresh"})`.
+
+## Cleanup / Footprint
+
+Skills live under `.library/intrinsic/`, `.library/custom/`, network shared
+skill paths, and any extra paths configured in `init.json`. Intrinsic skills are
+runtime-owned; do not delete them. Custom/shared skills are portable procedure
+memory: cleanup should usually mean validation, renaming, consolidation, or git
+removal through a reviewed PR, not ad-hoc `rm`.
+
+Footprint check (read-only, records the audit):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd()
+roots = [p for p in [agent / ".library" / "custom", agent / ".library" / "intrinsic", agent.parent / ".library_shared"] if p.exists()]
+def size(p): return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for p in roots]
+total = sum(s for _, s in rows)
+print(f"skill roots: {len(rows)}; bytes: {total}")
+for p, s in rows: print(f"{s:>12}  {p}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "skills", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "skills footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: after authoring/publishing skills, before recipe export,
+and monthly for shared libraries. Destructive cleanup requires a dry-run report,
+explicit user consent, and a git commit/PR when the skill root is tracked.
