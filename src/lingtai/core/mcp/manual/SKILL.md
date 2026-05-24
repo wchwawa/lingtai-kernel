@@ -126,3 +126,35 @@ All registry mutations happen via `write` / `edit` / `bash`. The `mcp` capabilit
 
 - **Canonical spec**: `lingtai-kernel-anatomy reference/mcp-protocol.md` — full three-layer model, env injection, validator schema, **LICC v1** inbox callback contract, reference implementations.
 - **File formats**: `lingtai-kernel-anatomy reference/file-formats.md` §2.7 (init.json `addons` + `mcp` fields), §6 (`mcp/servers.json` legacy direct mounts), §6.5 (`mcp_registry.jsonl`), §6.6 (`.mcp_inbox/<name>/<id>.json` LICC events).
+
+## Cleanup / Footprint
+
+MCP itself owns registry/configuration state (`mcp_registry.jsonl`, optional
+`mcp/servers.json`, and `.mcp_inbox/<name>/...` LICC event files). Curated addon
+packages such as Telegram/Feishu/WeChat/IMAP also maintain their own data
+stores; their README/manual is responsible for declaring addon-specific cleanup
+such as downloaded voice/audio attachments. Do not delete credentials or active
+registry entries as a cleanup shortcut.
+
+Footprint check (read-only, records the audit):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd()
+roots = [p for p in [agent / "mcp_registry.jsonl", agent / "mcp", agent / ".mcp_inbox"] if p.exists()]
+def size(p): return p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for p in roots]
+total = sum(s for _, s in rows)
+print(f"mcp roots: {len(rows)}; bytes: {total}")
+for p, s in rows: print(f"{s:>12}  {p}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "mcp", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "mcp footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: after adding/removing MCP servers, when `.mcp_inbox` grows,
+and before sharing a project. Cleanup requires explicit user consent after the
+dry-run report, and the audit/apply step must be recorded in `logs/cleanup.jsonl`. Prefer deregistering/updating registry files followed by
+`system(action="refresh")` over deleting registry state by hand.

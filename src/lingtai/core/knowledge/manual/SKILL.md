@@ -128,3 +128,34 @@ Create or update a knowledge entry when the information is useful beyond the cur
 - conclusions from research that are specific to this agent's work.
 
 If the content is a reusable how-to that another agent should be able to apply without your private context, write a skill instead.
+
+## Cleanup / Footprint
+
+Knowledge entries live under `knowledge/<name>/KNOWLEDGE.md` plus supporting
+files. They are durable memory, not cache. Cleanup usually means consolidation,
+renaming, or archiving stale entries after review; never delete knowledge just to
+save space unless the user explicitly agrees after a dry-run report and the content is backed up or no
+longer useful.
+
+Footprint check (read-only, records the audit):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd(); root = agent / "knowledge"
+entries = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
+def size(p): return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for p in entries]
+total = sum(s for _, s in rows)
+print(f"knowledge entries: {len(rows)}; bytes: {total}")
+for p, s in sorted(rows, key=lambda r: r[1], reverse=True)[:30]: print(f"{s:>12}  {p.name}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "knowledge", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "knowledge footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: before molt if knowledge sprawl is confusing, after major
+projects, and monthly for long-lived agents. If cleanup is approved with explicit user consent, record the
+entries consolidated/removed in `logs/cleanup.jsonl` and update the catalog with
+`knowledge(action="info")`.

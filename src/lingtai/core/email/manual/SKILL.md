@@ -250,3 +250,36 @@ email(action="add_contact", address="mimo-1", name="MiMo (vision)",
 
 ---
 > **Found a bug or issue?** If you encounter any problems with this skill, load the `lingtai-issue-report` skill and follow its instructions to report it.
+
+## Cleanup / Footprint
+
+Internal email persists under the agent mailbox: inbox/archive/sent message
+files, attachments, contacts, and schedule metadata. Mail is also memory: do not
+blindly delete it. Prefer `email(archive)`, `email(delete)`, or schedule cancel
+verbs over `rm`, and never delete mail that is the only copy of a decision,
+handoff, or attachment the human may expect you to retain.
+
+Footprint check (read-only, records the audit):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd()
+roots = [p for p in [agent / "mailbox", agent / "mail", agent / "email"] if p.exists()]
+def size(p):
+    return p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for r in roots for p in ([r] if r.is_file() else r.iterdir())]
+total = sum(s for _, s in rows)
+print(f"internal email roots: {[str(r) for r in roots]}")
+print(f"top-level entries: {len(rows)}; bytes: {total}")
+for p, s in sorted(rows, key=lambda r: r[1], reverse=True)[:20]: print(f"{s:>12}  {p}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "email", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "internal email footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: when large attachments are exchanged, before exporting or
+archiving a project, and quarterly for long-lived agents. Cleanup requires a
+dry-run report plus explicit user consent; after deletion/archive, append an
+`apply` record to `logs/cleanup.jsonl`.

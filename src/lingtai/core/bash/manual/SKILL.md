@@ -620,3 +620,35 @@ Don't delete the script first — if the unit is still loaded and tries to fire 
 # Other bash topics
 
 This section is empty. As more operational knowledge accumulates (debugging pipelines, working with binary data, locale handling), it gets added here.
+
+## Cleanup / Footprint for bash work
+
+`bash` can create anything the command creates: scripts, logs, downloads,
+virtualenvs, cron/launchd/systemd units, and arbitrary build artifacts. Because
+ownership is command-specific, every non-trivial bash workflow should document
+its own cleanup path near the script it creates. Never run a destructive shell
+cleanup from a manual without first showing a dry-run and getting explicit user
+consent.
+
+Generic footprint check (read-only, records the audit from the agent directory):
+
+```bash
+python3 - <<'PY'
+import json, time
+from pathlib import Path
+agent = Path.cwd()
+roots = [p for p in [agent / "tmp", agent / "logs", agent / "scripts"] if p.exists()]
+def size(p): return p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+rows = [(p, size(p)) for p in roots]
+total = sum(s for _, s in rows)
+print(f"bash-adjacent roots: {len(rows)}; bytes: {total}")
+for p, s in rows: print(f"{s:>12}  {p}")
+log = agent / "logs" / "cleanup.jsonl"; log.parent.mkdir(parents=True, exist_ok=True)
+log.open("a", encoding="utf-8").write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": "bash", "dry_run": True, "candidates": len(rows), "bytes": total, "human_approved": False, "summary": "bash-adjacent footprint audit"}) + "\n")
+PY
+```
+
+Recommended cadence: when retiring cron jobs, after large downloads/builds, and
+whenever a shell workflow writes outside a short-lived temp directory. Cleanup
+records belong in `logs/cleanup.jsonl`; cron/launchd/systemd retirement should
+also record the scheduler unit name that was unloaded.
