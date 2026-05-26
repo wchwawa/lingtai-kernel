@@ -2164,7 +2164,6 @@ class DaemonManager:
     # nothing is lost.
     _OPENCODE_SESSION_FIELDS = (
         "session_id", "sessionID", "sessionId", "session",
-        "id",         # only honoured for session-shaped events
         "thread_id", "threadId",
     )
 
@@ -2211,6 +2210,13 @@ class DaemonManager:
                 inner = val.get("id") or val.get("session_id") or val.get("sessionID")
                 if isinstance(inner, str) and inner:
                     return inner
+        # A bare top-level ``id`` is commonly an event/message id. Only treat
+        # it as a session id when the event type is explicitly session-shaped.
+        etype = event.get("type")
+        if isinstance(etype, str) and "session" in etype.lower():
+            val = event.get("id")
+            if isinstance(val, str) and val:
+                return val
         # Some opencode builds emit a ``data`` envelope on session events.
         data = event.get("data")
         if isinstance(data, dict):

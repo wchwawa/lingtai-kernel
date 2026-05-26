@@ -114,7 +114,8 @@ def test_schema_backend_options_description_mentions_opencode():
     ({"sessionID": "def"}, "def"),
     ({"sessionId": "ghi"}, "ghi"),
     ({"session": "jkl"}, "jkl"),
-    ({"id": "mno"}, "mno"),
+    ({"id": "mno"}, None),  # bare event/message id is not a session id
+    ({"type": "session.created", "id": "mno"}, "mno"),
     ({"thread_id": "pqr"}, "pqr"),
     ({"threadId": "stu"}, "stu"),
     ({"session": {"id": "nested"}}, "nested"),
