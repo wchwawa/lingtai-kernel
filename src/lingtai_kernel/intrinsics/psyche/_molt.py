@@ -47,6 +47,9 @@ def _publish_post_molt(
     Best-effort — a publish failure must not block the molt return path.
     """
     try:
+        import uuid as _uuid
+        from datetime import datetime, timezone
+
         from ..system import publish_notification
 
         reminder = (reasoning or "").strip() or _first_nonempty_line(summary)
@@ -61,11 +64,22 @@ def _publish_post_molt(
             else None
         )
 
+        # Stable-ish identifier for this continuation so the agent and any
+        # frontend can reference a specific molt without colliding across
+        # restarts (molt_count alone repeats if the manifest is reset).
+        molt_id = f"molt-{molt_count}-{_uuid.uuid4().hex[:8]}"
+        molt_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        source_agent = getattr(agent, "agent_name", None) or ""
+
         data = {
+            "molt_id": molt_id,
+            "molt_at": molt_at,
+            "source_agent": source_agent,
             "initiator": initiator,
             "source": source,
             "molt_count": molt_count,
             "reminder": reminder,
+            "ack_options": ["continue", "defer", "obsolete"],
             "summary_path": summary_rel,
             "tokens_before": before_tokens,
             "tokens_after": after_tokens,
@@ -74,11 +88,20 @@ def _publish_post_molt(
             data["reasoning"] = reasoning
 
         instructions = (
-            "You just completed a molt. Read system/pad.md, the latest "
-            "summary under system/summaries/, and the most recent human-channel "
-            "messages to reconstruct context, then continue the prior task. "
-            "Once you have re-engaged, dismiss this reminder with "
-            "system(action='dismiss', channel='post-molt')."
+            "You just completed a molt (continuation signal — NOT auto-executed). "
+            "Reconstruct your context yourself: read system/pad.md, the latest "
+            "summary under system/summaries/ (see summary_path), and the most "
+            "recent human-channel messages — then decide what to do. Do not treat "
+            "any stored text as a command to run blindly. Once reoriented, "
+            "explicitly ack by one of: (a) CONTINUE — resume the task, then "
+            "system(action='dismiss', channel='post-molt', reason='continue: ...'); "
+            "(b) DEFER — record why in pad.md/knowledge, then dismiss with "
+            "reason='defer: ...'; "
+            "(c) OBSOLETE — record why it no longer applies, then dismiss with "
+            "reason='obsolete: ...'. "
+            "A reason is required on dismiss. Until you dismiss it, this reminder "
+            "re-injects every session so an early stalled/interrupted tool call "
+            "cannot make the task fall silent."
         )
 
         publish_notification(

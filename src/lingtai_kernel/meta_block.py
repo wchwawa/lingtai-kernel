@@ -213,10 +213,12 @@ def _collect_active_notifications_payload(agent) -> dict | None:
     it with the same guidance fields used by the synthesized notification pair.
     Returns ``None`` when there are no active channels (or anything goes wrong);
     callers treat ``None`` as "do not stamp."
+
     """
     try:
         from .notifications import collect_notifications
         from pathlib import Path
+        from .notifications import notification_fingerprint
 
         working_dir = getattr(agent, "_working_dir", None)
         if working_dir is None:
@@ -324,14 +326,19 @@ def attach_active_notifications(
           registered.
         * If active notifications exist, stamp the same ``notifications`` +
           ``_notification_guidance`` payload shape used by the synthesized
-          notification pair onto the latest dict-shaped tool result, commit
-          the current ``notification_fingerprint`` onto
-          ``agent._notification_fp`` so the IDLE-path synthesized pair will
-          not later re-deliver the same unchanged state, and return that dict
-          as the new holder.
+          notification pair onto the latest dict-shaped tool result, commit the
+          current filesystem fingerprint onto ``agent._notification_fp`` so the
+          IDLE-path synthesized pair will not later re-deliver the same
+          unchanged state, and return that dict as the new holder.
         * If there are no active notifications, no stamping happens,
           ``_notification_fp`` is left untouched, and ``None`` is returned
           (callers should also clear their holder).
+
+    ``post-molt`` is intentionally not special-cased here.  The dangerous race
+    is narrower: the ``psyche.molt`` tool call writes ``post-molt.json`` before
+    returning, so only that same molt-result batch must skip active stamping.
+    Later ACTIVE batches may consume the post-molt notification normally; if no
+    later ACTIVE batch happens, the IDLE/ASLEEP sync path wakes the agent.
 
     ``tool_results`` is the list of ToolResultBlock objects returned from
     ToolExecutor; their ``.content`` is shared by reference with the canonical
@@ -375,12 +382,11 @@ def attach_active_notifications(
 
     # Commit the fingerprint so the IDLE-path `_sync_notifications` will
     # see fp == agent._notification_fp and skip the synthesized pair for
-    # this same unchanged state. Read the fingerprint of the same files
-    # we just stamped from. Best-effort: a fingerprint failure must not
-    # break the (already-successful) stamping.
+    # this same unchanged state.  Best-effort: a fingerprint failure must
+    # not break the (already successful) stamping.
     try:
-        from .notifications import notification_fingerprint
         from pathlib import Path
+        from .notifications import notification_fingerprint
 
         working_dir = getattr(agent, "_working_dir", None)
         if working_dir is not None and hasattr(agent, "_notification_fp"):
@@ -389,6 +395,7 @@ def attach_active_notifications(
         pass
 
     return target
+
 
 
 def render_meta(agent, meta: dict) -> str:

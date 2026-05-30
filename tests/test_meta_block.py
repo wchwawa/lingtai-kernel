@@ -642,4 +642,56 @@ def test_clear_active_notification_holder_handles_missing_key():
     clear_active_notification_holder(agent)
     assert holder == {"ok": True}
     assert agent._notification_live_holder is None
+
+
 # ---------------------------------------------------------------------------
+# Post-molt active stamping regression.
+#
+# ``post-molt`` itself is an ordinary notification channel for active stamping.
+# The race is narrower: the *same* ``psyche.molt`` result batch that publishes
+# post-molt must skip stamping/committing it.  That per-batch deferral lives in
+# ``base_agent.turn``; once a later ACTIVE tool batch exists, the post-molt
+# notification may be consumed normally.
+# ---------------------------------------------------------------------------
+
+
+def _write_post_molt_notif(tmp_path):
+    notif_dir = tmp_path / ".notification"
+    notif_dir.mkdir(parents=True, exist_ok=True)
+    (notif_dir / "post-molt.json").write_text(
+        '{"header": "post-molt #1 — resume work", "icon": "🌱", '
+        '"priority": "high", "data": {"molt_count": 1, '
+        '"reminder": "continue the task"}}'
+    )
+
+
+def test_attach_active_notifications_can_stamp_post_molt_after_molt_batch(tmp_path):
+    """Post-molt is not globally idle-only; later ACTIVE batches may consume it."""
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    _write_post_molt_notif(tmp_path)
+    agent = _notif_agent(tmp_path)
+
+    block = ToolResultBlock(id="t1", name="x", content={"ok": True})
+    holder = attach_active_notifications(agent, [block], prior_holder=None)
+
+    assert holder is block.content
+    assert "post-molt" in block.content["notifications"]
+    assert agent._notification_fp == notification_fingerprint(tmp_path)
+
+
+def test_attach_active_notifications_stamps_post_molt_with_other_channels(tmp_path):
+    """Mixed ordinary channels and post-molt stamp together on non-molt batches."""
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    _write_email_notif(tmp_path)
+    _write_post_molt_notif(tmp_path)
+    agent = _notif_agent(tmp_path)
+
+    block = ToolResultBlock(id="t1", name="x", content={"ok": True})
+    holder = attach_active_notifications(agent, [block], prior_holder=None)
+
+    assert holder is block.content
+    assert "email" in block.content["notifications"]
+    assert "post-molt" in block.content["notifications"]
+    assert agent._notification_fp == notification_fingerprint(tmp_path)

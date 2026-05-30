@@ -589,6 +589,81 @@ def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
     assert msg.type == MSG_TC_WAKE
 
 
+def test_sync_idle_injects_post_molt_after_molt_batch_deferred_stamp(tmp_path: Path) -> None:
+    """Regression for the post-molt continuation bug.
+
+    A ``post-molt`` continuation is written while the agent is still ACTIVE
+    inside the ``psyche.molt`` tool call.  That same molt-result batch must skip
+    active notification stamping and leave ``_notification_fp`` uncommitted; if
+    it stamped post-molt and committed the full fingerprint, the IDLE
+    ``_sync_notifications`` pass would see no change and never inject the
+    synthesized pair + MSG_TC_WAKE.
+
+    Here we reproduce the uncommitted-fp state left by the per-molt-batch
+    deferral and assert IDLE sync injects the wake.
+    """
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.state import AgentState
+    from lingtai_kernel.message import MSG_TC_WAKE
+
+    chat = _make_chat_stub()
+
+    class _Agent(BaseAgent):
+        def __init__(self, workdir):
+            self._working_dir = workdir
+            self._state = AgentState.IDLE
+            self._notification_fp = ()
+            self._notification_block_id = None
+            self._pending_notification_meta = None
+            self._chat_stub = chat
+            self._logs = []
+            self.agent_name = "stub"
+            import queue
+            self.inbox = queue.Queue()
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _save_chat_history(self, *, ledger_source="main"):
+            pass
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+        def _wake_nap(self, *_a, **_kw):
+            pass
+
+        def _set_state(self, *_a, **_kw):
+            pass
+
+        def _reset_uptime(self):
+            pass
+
+    agent = _Agent(tmp_path)
+    # The molt wrote the continuation channel while ACTIVE.
+    publish(tmp_path, "post-molt", {
+        "header": "post-molt #1 — resume work",
+        "icon": "🌱",
+        "priority": "high",
+        "data": {"molt_count": 1, "reminder": "continue the task"},
+    })
+    # Reproduce the fp the deferred molt batch leaves: unchanged/uncommitted.
+    agent._notification_fp = ()
+
+    agent._sync_notifications()
+
+    # The IDLE path must still inject the synthesized (call, result) pair...
+    entries = agent._chat_stub.interface.entries
+    assert len(entries) == 2, "post-molt continuation must be injected at IDLE"
+    body = entries[1].content[0].content
+    assert isinstance(body, dict)
+    assert "post-molt" in body["notifications"]
+    # ...and post a wake so the run loop reorients around the continuation.
+    msg = agent.inbox.get_nowait()
+    assert msg.type == MSG_TC_WAKE
+
+
 def test_sync_idle_injects_pair_with_synthesized_marker(tmp_path: Path) -> None:
     """IDLE: fingerprint change → synthetic pair appended; result block
     has synthesized=True and JSON body carries `_synthesized: true`."""
@@ -1569,3 +1644,77 @@ def test_responses_convert_input_none_yields_empty_list() -> None:
 
     session = OpenAIResponsesSession.__new__(OpenAIResponsesSession)
     assert OpenAIResponsesSession._convert_input(session, None) == []
+
+
+
+def test_context_molt_batch_skips_active_notification_stamp(tmp_path):
+    """The psyche.molt result batch must not consume its own post-molt wake."""
+    from types import SimpleNamespace
+
+    from lingtai_kernel.base_agent.turn import _batch_includes_context_molt
+    from lingtai_kernel.llm.base import ToolCall
+    from lingtai_kernel.llm.interface import ToolResultBlock
+    from lingtai_kernel.meta_block import attach_active_notifications
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    notif_dir = tmp_path / ".notification"
+    notif_dir.mkdir(parents=True, exist_ok=True)
+    (notif_dir / "post-molt.json").write_text(
+        '{"header": "post-molt #1", "data": {"molt_count": 1}}'
+    )
+
+    agent = SimpleNamespace(
+        _working_dir=tmp_path,
+        _notification_fp=(("sentinel.json", 1, 1),),
+        _notification_live_holder=None,
+    )
+    molt_call = ToolCall(
+        name="psyche",
+        args={"object": "context", "action": "molt", "summary": "continue"},
+        id="call_molt",
+    )
+    assert _batch_includes_context_molt([molt_call]) is True
+
+    molt_result = ToolResultBlock(id="call_molt", name="psyche", content={"status": "ok"})
+    if not _batch_includes_context_molt([molt_call]):
+        agent._notification_live_holder = attach_active_notifications(
+            agent, [molt_result], prior_holder=agent._notification_live_holder
+        )
+
+    assert "notifications" not in molt_result.content
+    assert agent._notification_fp == (("sentinel.json", 1, 1),)
+    assert notification_fingerprint(tmp_path) != agent._notification_fp
+
+
+def test_non_molt_batch_after_molt_can_consume_post_molt(tmp_path):
+    """If the agent keeps going ACTIVE after molt, the next batch sees post-molt."""
+    from types import SimpleNamespace
+
+    from lingtai_kernel.base_agent.turn import _batch_includes_context_molt
+    from lingtai_kernel.llm.base import ToolCall
+    from lingtai_kernel.llm.interface import ToolResultBlock
+    from lingtai_kernel.meta_block import attach_active_notifications
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    notif_dir = tmp_path / ".notification"
+    notif_dir.mkdir(parents=True, exist_ok=True)
+    (notif_dir / "post-molt.json").write_text(
+        '{"header": "post-molt #1", "data": {"molt_count": 1}}'
+    )
+
+    agent = SimpleNamespace(
+        _working_dir=tmp_path,
+        _notification_fp=(),
+        _notification_live_holder=None,
+    )
+    later_call = ToolCall(name="bash", args={"command": "true"}, id="call_later")
+    assert _batch_includes_context_molt([later_call]) is False
+
+    later_result = ToolResultBlock(id="call_later", name="bash", content={"status": "ok"})
+    if not _batch_includes_context_molt([later_call]):
+        agent._notification_live_holder = attach_active_notifications(
+            agent, [later_result], prior_holder=agent._notification_live_holder
+        )
+
+    assert "post-molt" in later_result.content["notifications"]
+    assert agent._notification_fp == notification_fingerprint(tmp_path)

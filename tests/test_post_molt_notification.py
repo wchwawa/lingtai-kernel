@@ -254,6 +254,122 @@ class TestPostMoltNotificationSystemForget:
 # ---------------------------------------------------------------------------
 
 
+class TestPostMoltContinuationSignal:
+    """Issue #184 — the post-molt notification is an actionable continuation
+    signal carrying molt_id / molt_at / source_agent and an ack taxonomy
+    (continue / defer / obsolete), durable until dismissed with a reason.
+
+    Per PR #190 feedback there is intentionally **no** heuristic next-action
+    extraction: the agent reconstructs context itself from pad / summary /
+    human-channel messages — the kernel never excerpts or parses the summary.
+    """
+
+    def test_agent_molt_carries_continuation_fields(self, tmp_path):
+        agent = _make_agent_with_psyche(tmp_path)
+        agent.start()
+        try:
+            mock_interface = _setup_mock_chat(agent)
+            tc_id = "toolu_cont_1"
+            summary = (
+                "Did the foundation work for the doctor skill.\n"
+                "Next action: open the PR and run focused tests."
+            )
+            _build_molt_call_entry(mock_interface, tc_id, summary=summary)
+
+            from lingtai_kernel.intrinsics.psyche._molt import _context_molt
+            result = _context_molt(agent, {"summary": summary, "_tc_id": tc_id})
+            assert result.get("status") == "ok"
+
+            payload = _read_post_molt(agent)
+            data = payload["data"]
+            # Continuation identity fields are present.
+            assert data.get("ack_options") == ["continue", "defer", "obsolete"]
+            assert data.get("molt_id"), "continuation must carry a molt_id"
+            assert data["molt_id"].startswith(f"molt-{result['molt_count']}-")
+            assert data.get("molt_at"), "continuation must carry a timestamp"
+            # source_agent echoes the agent's true name.
+            assert data.get("source_agent") == "test"
+            # No heuristic extraction: the kernel must NOT excerpt the summary.
+            assert "next_action" not in data
+            # summary_path is the pointer the agent reconstructs from instead.
+            assert "summary_path" in data
+
+        finally:
+            agent.stop()
+
+    def test_instructions_spell_out_reconstruct_then_ack(self, tmp_path):
+        agent = _make_agent_with_psyche(tmp_path)
+        agent.start()
+        try:
+            mock_interface = _setup_mock_chat(agent)
+            tc_id = "toolu_cont_2"
+            _build_molt_call_entry(mock_interface, tc_id, summary="keep going")
+
+            from lingtai_kernel.intrinsics.psyche._molt import _context_molt
+            result = _context_molt(agent, {"summary": "keep going", "_tc_id": tc_id})
+            assert result.get("status") == "ok"
+
+            instr = (_read_post_molt(agent).get("instructions") or "").lower()
+            # Self-reconstruction sources are named explicitly.
+            assert "pad" in instr
+            assert "summary" in instr
+            assert "human-channel" in instr or "human channel" in instr
+            # The three ack paths must be discoverable from the instructions.
+            assert "continue" in instr
+            assert "defer" in instr
+            assert "obsolete" in instr
+            # Concrete dismiss mechanism + reason-required ack.
+            assert "post-molt" in instr
+            assert "reason='continue" in instr
+            assert "reason='defer" in instr
+            assert "reason='obsolete" in instr
+            # No-auto-execution must be explicit (non-goal guard).
+            assert "not auto-executed" in instr or "not auto" in instr
+
+        finally:
+            agent.stop()
+
+    def test_no_next_action_field_even_with_marker_summary(self, tmp_path):
+        """A summary that looks like it has a 'next action:' marker must NOT
+        produce a next_action field — heuristic extraction is removed."""
+        agent = _make_agent_with_psyche(tmp_path)
+        agent.start()
+        try:
+            mock_interface = _setup_mock_chat(agent)
+            tc_id = "toolu_cont_3"
+            summary = "Next step: finish wiring the parser; tests red on case 3."
+            _build_molt_call_entry(mock_interface, tc_id, summary=summary)
+
+            from lingtai_kernel.intrinsics.psyche._molt import _context_molt
+            result = _context_molt(agent, {"summary": summary, "_tc_id": tc_id})
+            assert result.get("status") == "ok"
+
+            data = _read_post_molt(agent)["data"]
+            assert "next_action" not in data
+
+        finally:
+            agent.stop()
+
+    def test_system_forget_also_carries_continuation_fields(self, tmp_path):
+        agent = _make_agent_with_psyche(tmp_path)
+        agent.start()
+        try:
+            _setup_mock_chat(agent)
+            from lingtai_kernel.intrinsics.psyche._molt import context_forget
+            result = context_forget(agent, source="warning_ladder")
+            assert result.get("status") == "ok"
+
+            data = _read_post_molt(agent)["data"]
+            assert data.get("molt_id", "").startswith(f"molt-{result['molt_count']}-")
+            assert data.get("molt_at")
+            assert data.get("source_agent") == "test"
+            assert data.get("ack_options") == ["continue", "defer", "obsolete"]
+            assert "next_action" not in data
+
+        finally:
+            agent.stop()
+
+
 class TestPostMoltChannelIsolation:
     def test_pressure_below_threshold_clears_molt_not_post_molt(self, tmp_path):
         """Falling under molt_pressure clears `.notification/molt.json` but
