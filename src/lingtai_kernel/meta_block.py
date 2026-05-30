@@ -28,22 +28,6 @@ from .i18n import t as _t
 from .time_veil import now_iso
 
 
-#: Notification channels that must NOT be delivered via active-state
-#: tool-result stamping. These are kernel-owned continuation signals whose
-#: whole purpose is to *wake* the agent at the next IDLE/ASLEEP boundary via
-#: the synthesized ``system(action="notification")`` pair + ``MSG_TC_WAKE``
-#: built in ``_inject_notification_pair``. If they were stamped onto a tool
-#: result while the agent is ACTIVE, ``attach_active_notifications`` would also
-#: commit ``_notification_fp`` and the later ``_sync_notifications`` IDLE pass
-#: would see no change and never inject the wake — so the agent could fall
-#: silent (the ``post-molt`` continuation bug). They are therefore excluded
-#: from the active stamp AND from the fingerprint committed here, leaving them
-#: for the IDLE/ASLEEP path to deliver. The channel name mirrors
-#: ``psyche._molt._POST_MOLT_CHANNEL``; kept as a literal here so this
-#: low-level module needs no import from the intrinsics layer.
-IDLE_ONLY_NOTIFICATION_CHANNELS: frozenset[str] = frozenset({"post-molt"})
-
-
 def build_meta(agent) -> dict:
     """Return the current meta-data snapshot for the agent.
 
@@ -230,24 +214,16 @@ def _collect_active_notifications_payload(agent) -> dict | None:
     Returns ``None`` when there are no active channels (or anything goes wrong);
     callers treat ``None`` as "do not stamp."
 
-    Channels in :data:`IDLE_ONLY_NOTIFICATION_CHANNELS` (e.g. ``post-molt``)
-    are dropped here so they are never delivered via active-state stamping —
-    they must wake the agent through the IDLE/ASLEEP synthesized pair instead.
-    If every active channel is idle-only, this returns ``None``.
     """
     try:
         from .notifications import collect_notifications
         from pathlib import Path
+        from .notifications import notification_fingerprint
 
         working_dir = getattr(agent, "_working_dir", None)
         if working_dir is None:
             return None
         notifications = collect_notifications(Path(working_dir))
-        notifications = {
-            name: payload
-            for name, payload in notifications.items()
-            if name not in IDLE_ONLY_NOTIFICATION_CHANNELS
-        }
         if not notifications:
             return None
         return build_notification_payload(notifications)
@@ -348,24 +324,21 @@ def attach_active_notifications(
           placeholder.  Either way the prior holder is cleared from
           ``agent._notification_live_holder`` before the new holder is
           registered.
-        * If active *stampable* notifications exist, stamp the same
-          ``notifications`` + ``_notification_guidance`` payload shape used by
-          the synthesized notification pair onto the latest dict-shaped tool
-          result, commit a fingerprint of those channels onto
-          ``agent._notification_fp`` so the IDLE-path synthesized pair will
-          not later re-deliver the same unchanged state, and return that dict
-          as the new holder.
-        * If there are no active stampable notifications, no stamping happens,
+        * If active notifications exist, stamp the same ``notifications`` +
+          ``_notification_guidance`` payload shape used by the synthesized
+          notification pair onto the latest dict-shaped tool result, commit the
+          current filesystem fingerprint onto ``agent._notification_fp`` so the
+          IDLE-path synthesized pair will not later re-deliver the same
+          unchanged state, and return that dict as the new holder.
+        * If there are no active notifications, no stamping happens,
           ``_notification_fp`` is left untouched, and ``None`` is returned
           (callers should also clear their holder).
 
-    Idle-only channels (:data:`IDLE_ONLY_NOTIFICATION_CHANNELS`, e.g.
-    ``post-molt``) are never stamped here and are excluded from the committed
-    fingerprint, so they remain for the IDLE/ASLEEP ``_sync_notifications``
-    path to inject as a synthesized pair + ``MSG_TC_WAKE``. This is what lets a
-    ``post-molt`` continuation — written while the agent is still ACTIVE inside
-    the ``psyche.molt`` tool call — actually wake the fresh session instead of
-    being silently absorbed onto the molt tool result.
+    ``post-molt`` is intentionally not special-cased here.  The dangerous race
+    is narrower: the ``psyche.molt`` tool call writes ``post-molt.json`` before
+    returning, so only that same molt-result batch must skip active stamping.
+    Later ACTIVE batches may consume the post-molt notification normally; if no
+    later ACTIVE batch happens, the IDLE/ASLEEP sync path wakes the agent.
 
     ``tool_results`` is the list of ToolResultBlock objects returned from
     ToolExecutor; their ``.content`` is shared by reference with the canonical
@@ -409,48 +382,20 @@ def attach_active_notifications(
 
     # Commit the fingerprint so the IDLE-path `_sync_notifications` will
     # see fp == agent._notification_fp and skip the synthesized pair for
-    # this same unchanged state. Read the fingerprint of the same files
-    # we just stamped from — but EXCLUDE the idle-only channels we did not
-    # stamp (``post-molt`` …) so the IDLE path still detects them as a
-    # change and injects the wake pair. The IDLE comparison uses the full
-    # ``notification_fingerprint`` (all channels), so committing a subset
-    # fingerprint here guarantees fp != _notification_fp whenever an
-    # idle-only channel is present, forcing the synthesized-pair delivery.
-    # Best-effort: a fingerprint failure must not break the (already
-    # successful) stamping.
+    # this same unchanged state.  Best-effort: a fingerprint failure must
+    # not break the (already successful) stamping.
     try:
         from pathlib import Path
+        from .notifications import notification_fingerprint
 
         working_dir = getattr(agent, "_working_dir", None)
         if working_dir is not None and hasattr(agent, "_notification_fp"):
-            agent._notification_fp = _fingerprint_excluding_idle_only(Path(working_dir))
+            agent._notification_fp = notification_fingerprint(Path(working_dir))
     except Exception:
         pass
 
     return target
 
-
-def _fingerprint_excluding_idle_only(workdir) -> tuple:
-    """Fingerprint of ``.notification/*.json`` minus idle-only channels.
-
-    Mirrors :func:`notifications.notification_fingerprint`'s ``(name,
-    mtime_ns, size)`` triple shape, but skips files whose stem is in
-    :data:`IDLE_ONLY_NOTIFICATION_CHANNELS`. Committing this as
-    ``_notification_fp`` after an active stamp leaves the idle-only channels
-    "uncommitted" so the IDLE/ASLEEP ``_sync_notifications`` pass (which
-    fingerprints ALL channels) still sees a difference and delivers the wake.
-    """
-    from pathlib import Path
-
-    notif_dir = Path(workdir) / ".notification"
-    if not notif_dir.is_dir():
-        return ()
-    return tuple(sorted(
-        (f.name, f.stat().st_mtime_ns, f.stat().st_size)
-        for f in notif_dir.iterdir()
-        if f.is_file() and f.suffix == ".json"
-        and f.stem not in IDLE_ONLY_NOTIFICATION_CHANNELS
-    ))
 
 
 def render_meta(agent, meta: dict) -> str:

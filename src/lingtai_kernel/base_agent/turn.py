@@ -719,6 +719,29 @@ def _check_molt_pressure(agent) -> None:
     )
 
 
+def _is_context_molt_call(tc) -> bool:
+    """Return True when ``tc`` is ``psyche(context, molt, ...)``.
+
+    A post-molt notification is published before the ``psyche.molt`` tool
+    result returns.  If that same result batch were active-stamped with the
+    notification and committed its fingerprint, the subsequent IDLE boundary
+    would see no change and would not inject the synthesized notification +
+    ``MSG_TC_WAKE`` continuation.  Only the molt batch needs this deferral:
+    later ACTIVE batches may consume the post-molt notification normally, while
+    an immediate IDLE boundary will wake from the still-uncommitted file state.
+    """
+    if getattr(tc, "name", None) != "psyche":
+        return False
+    args = getattr(tc, "args", None)
+    if not isinstance(args, dict):
+        return False
+    return args.get("object") == "context" and args.get("action") == "molt"
+
+
+def _batch_includes_context_molt(tool_calls) -> bool:
+    return any(_is_context_molt_call(tc) for tc in tool_calls or [])
+
+
 def _handle_request(agent, msg: Message) -> None:
     """Send request to LLM, process response with tool calls."""
     # Splice any queued involuntary tool-call pairs
@@ -1180,11 +1203,23 @@ def _process_response(agent, response, *, ledger_source: str = "main") -> dict:
         # holder was a synthesized pair, its content becomes a skeleton
         # placeholder (kept in history); if it was a normal tool result,
         # its canonical notification payload keys are removed.
-        agent._notification_live_holder = attach_active_notifications(
-            agent,
-            tool_results,
-            prior_holder=agent._notification_live_holder,
-        )
+        if _batch_includes_context_molt(response.tool_calls):
+            # ``psyche.molt`` publishes ``.notification/post-molt.json`` before
+            # its own tool result returns.  Do not let that same result batch
+            # consume the notification or commit its fingerprint; otherwise the
+            # post-turn IDLE sync would see no change and skip the wake.  Leaving
+            # the fingerprint untouched lets the next boundary choose naturally:
+            # IDLE/ASLEEP injects synthesized notification + MSG_TC_WAKE; a later
+            # ACTIVE tool-result batch stamps the notification normally.
+            if agent._notification_live_holder is not None:
+                from ..meta_block import skeletonize_notification_holder
+                skeletonize_notification_holder(agent)
+        else:
+            agent._notification_live_holder = attach_active_notifications(
+                agent,
+                tool_results,
+                prior_holder=agent._notification_live_holder,
+            )
 
         if intercepted:
             if tool_results and agent._chat:
