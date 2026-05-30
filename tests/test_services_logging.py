@@ -3,7 +3,15 @@ import json
 import threading
 from pathlib import Path
 
-from lingtai_kernel.services.logging import LoggingService, JSONLLoggingService
+from lingtai_kernel.services.logging import (
+    CompositeLoggingService,
+    JSONLLoggingService,
+    LoggingService,
+    SQLiteEventIndex,
+    doctor_sqlite_event_index,
+    query_sqlite_event_index,
+    rebuild_sqlite_event_index,
+)
 
 
 class TestJSONLLoggingService:
@@ -199,3 +207,99 @@ class TestBaseAgentLoggingIntegration:
         events = agent._log_service.get_events()
         state_events = [e for e in events if e["type"] == "agent_state"]
         assert len(state_events) >= 1
+
+
+class TestSQLiteEventIndex:
+
+    def test_composite_writes_jsonl_and_sqlite(self, tmp_path):
+        log_file = tmp_path / "logs" / "events.jsonl"
+        sqlite_file = tmp_path / "logs" / "log.sqlite"
+        svc = CompositeLoggingService(
+            JSONLLoggingService(log_file),
+            sqlite_index=SQLiteEventIndex(sqlite_file, keep_open=False),
+        )
+        svc.log({"type": "agent_state", "address": "agent", "agent_name": "agent", "ts": 1.25, "new": "IDLE"})
+        svc.close()
+
+        assert log_file.is_file()
+        rows = query_sqlite_event_index(tmp_path, "SELECT type, agent_address, agent_name_snapshot FROM events")
+        assert rows == [{"type": "agent_state", "agent_address": "agent", "agent_name_snapshot": "agent"}]
+
+
+    def test_composite_after_close_does_not_create_sidecar_only_event(self, tmp_path):
+        log_file = tmp_path / "logs" / "events.jsonl"
+        sqlite_file = tmp_path / "logs" / "log.sqlite"
+        svc = CompositeLoggingService(
+            JSONLLoggingService(log_file),
+            sqlite_index=SQLiteEventIndex(sqlite_file, keep_open=False),
+        )
+        svc.close()
+        svc.log({"type": "after_close", "ts": 1})
+
+        assert log_file.read_text() == ""
+        rows = query_sqlite_event_index(tmp_path, "SELECT type FROM events WHERE type='after_close'")
+        assert rows == []
+
+    def test_sqlite_sidecar_fail_open(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        index = SQLiteEventIndex(tmp_path / "log.sqlite")
+        index.disable("simulated")
+        svc = CompositeLoggingService(JSONLLoggingService(log_file), sqlite_index=index)
+
+        svc.log({"type": "test", "ts": 1})
+        svc.close()
+
+        assert json.loads(log_file.read_text().strip())["type"] == "test"
+        assert index.disabled_reason == "simulated"
+
+    def test_query_rejects_mutating_sql(self, tmp_path):
+        index = SQLiteEventIndex(tmp_path / "log.sqlite")
+        try:
+            try:
+                index.query("DELETE FROM events")
+                assert False, "mutating query should be rejected"
+            except ValueError:
+                pass
+        finally:
+            index.close()
+
+    def test_rebuild_doctor_and_query(self, tmp_path):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        events = logs / "events.jsonl"
+        events.write_text(
+            json.dumps({"type": "alpha", "ts": 1, "address": "a", "agent_name": "n", "x": 1}) + "\n"
+            + json.dumps({"type": "beta", "ts": 2, "address": "a", "agent_name": "n", "x": 2}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = rebuild_sqlite_event_index(tmp_path)
+        assert result["status"] == "ok"
+        assert result["event_count"] == 2
+
+        doctor = doctor_sqlite_event_index(tmp_path)
+        assert doctor["status"] == "ok"
+        assert doctor["event_count"] == 2
+
+        rows = query_sqlite_event_index(tmp_path, "SELECT type, agent_address, agent_name_snapshot, json_extract(fields_json, '$.x') AS x FROM events ORDER BY ts")
+        assert rows == [
+            {"type": "alpha", "agent_address": "a", "agent_name_snapshot": "n", "x": 1},
+            {"type": "beta", "agent_address": "a", "agent_name_snapshot": "n", "x": 2},
+        ]
+
+        stored_fields = query_sqlite_event_index(tmp_path, "SELECT fields_json FROM events WHERE type='alpha'")[0]
+        assert json.loads(stored_fields["fields_json"]) == {"x": 1}
+
+    def test_base_agent_creates_sqlite_sidecar(self, tmp_path):
+        agent = BaseAgent(
+            service=make_mock_service(),
+            agent_name="test",
+            working_dir=tmp_path / "test_agent",
+        )
+        agent._log("custom", value=123)
+        agent._log_service.close()
+
+        sqlite_file = agent.working_dir / "logs" / "log.sqlite"
+        assert sqlite_file.is_file()
+        rows = query_sqlite_event_index(agent.working_dir, "SELECT type FROM events WHERE type='custom'")
+        assert rows == [{"type": "custom"}]

@@ -270,13 +270,18 @@ class BaseAgent:
         self._workdir = WorkingDir(working_dir)
         self._working_dir = self._workdir.path
 
-        # LoggingService: always JSONL in working dir
-        from ..services.logging import JSONLLoggingService
+        # LoggingService: JSONL is the source of truth; SQLite is an additive,
+        # fail-open sidecar index for queryable history.
+        from ..services.logging import CompositeLoggingService, JSONLLoggingService, SQLiteEventIndex
         log_dir = self._working_dir / "logs"
         log_dir.mkdir(exist_ok=True)
-        self._log_service = JSONLLoggingService(
+        jsonl_log_service = JSONLLoggingService(
             log_dir / "events.jsonl",
             ensure_ascii=self._config.ensure_ascii,
+        )
+        self._log_service = CompositeLoggingService(
+            jsonl_log_service,
+            sqlite_index=SQLiteEventIndex(log_dir / "log.sqlite", ensure=False, keep_open=False),
         )
 
         # Acquire working directory lock (10s grace for prior process cleanup)

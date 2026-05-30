@@ -317,3 +317,31 @@ def test_build_agent_no_addons(mock_mail, mock_agent, mock_llm, tmp_path):
 
     assert "addons" not in mock_agent.call_args.kwargs
     mock_agent.return_value._setup_from_init.assert_called_once()
+
+
+def test_log_rebuild_doctor_query_cli(tmp_path, capsys):
+    from lingtai.cli import main
+    import sys
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events.jsonl").write_text(json.dumps({"type": "cli_event", "ts": 1}) + "\n", encoding="utf-8")
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["lingtai-agent", "log", "rebuild", str(tmp_path)]
+        main()
+        rebuild_out = json.loads(capsys.readouterr().out)
+        assert rebuild_out["status"] == "ok"
+
+        sys.argv = ["lingtai-agent", "log", "doctor", str(tmp_path)]
+        main()
+        doctor_out = json.loads(capsys.readouterr().out)
+        assert doctor_out["event_count"] == 1
+
+        sys.argv = ["lingtai-agent", "log", "query", str(tmp_path), "SELECT type FROM events"]
+        main()
+        query_out = json.loads(capsys.readouterr().out)
+        assert query_out == [{"type": "cli_event"}]
+    finally:
+        sys.argv = old_argv
