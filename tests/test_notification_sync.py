@@ -589,6 +589,84 @@ def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
     assert msg.type == MSG_TC_WAKE
 
 
+def test_sync_idle_injects_post_molt_after_active_stamp_excluded_it(tmp_path: Path) -> None:
+    """Regression for the post-molt continuation bug.
+
+    A ``post-molt`` continuation is written while the agent is still ACTIVE
+    inside the ``psyche.molt`` tool call.  ``attach_active_notifications``
+    deliberately does NOT stamp ``post-molt`` and commits a fingerprint that
+    EXCLUDES it (see test_meta_block). The previous behavior stamped it and
+    committed the full fingerprint, so the IDLE ``_sync_notifications`` pass
+    saw ``fp == _notification_fp`` and never injected the synthesized pair +
+    MSG_TC_WAKE — the fresh agent could fall silent.
+
+    Here we reproduce the committed-fp state the active stamp leaves behind
+    (post-molt excluded) and assert IDLE sync STILL injects the wake.
+    """
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.state import AgentState
+    from lingtai_kernel.message import MSG_TC_WAKE
+    from lingtai_kernel.meta_block import _fingerprint_excluding_idle_only
+
+    chat = _make_chat_stub()
+
+    class _Agent(BaseAgent):
+        def __init__(self, workdir):
+            self._working_dir = workdir
+            self._state = AgentState.IDLE
+            self._notification_fp = ()
+            self._notification_block_id = None
+            self._pending_notification_meta = None
+            self._chat_stub = chat
+            self._logs = []
+            self.agent_name = "stub"
+            import queue
+            self.inbox = queue.Queue()
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _save_chat_history(self, *, ledger_source="main"):
+            pass
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+        def _wake_nap(self, *_a, **_kw):
+            pass
+
+        def _set_state(self, *_a, **_kw):
+            pass
+
+        def _reset_uptime(self):
+            pass
+
+    agent = _Agent(tmp_path)
+    # The molt wrote the continuation channel while ACTIVE.
+    publish(tmp_path, "post-molt", {
+        "header": "post-molt #1 — resume work",
+        "icon": "🌱",
+        "priority": "high",
+        "data": {"molt_count": 1, "reminder": "continue the task"},
+    })
+    # Reproduce the fp the active stamp leaves: post-molt EXCLUDED. (With only
+    # post-molt present, this is the empty tuple — i.e. uncommitted-for-IDLE.)
+    agent._notification_fp = _fingerprint_excluding_idle_only(tmp_path)
+
+    agent._sync_notifications()
+
+    # The IDLE path must still inject the synthesized (call, result) pair...
+    entries = agent._chat_stub.interface.entries
+    assert len(entries) == 2, "post-molt continuation must be injected at IDLE"
+    body = entries[1].content[0].content
+    assert isinstance(body, dict)
+    assert "post-molt" in body["notifications"]
+    # ...and post a wake so the run loop reorients around the continuation.
+    msg = agent.inbox.get_nowait()
+    assert msg.type == MSG_TC_WAKE
+
+
 def test_sync_idle_injects_pair_with_synthesized_marker(tmp_path: Path) -> None:
     """IDLE: fingerprint change → synthetic pair appended; result block
     has synthesized=True and JSON body carries `_synthesized: true`."""

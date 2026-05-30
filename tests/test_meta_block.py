@@ -642,4 +642,98 @@ def test_clear_active_notification_holder_handles_missing_key():
     clear_active_notification_holder(agent)
     assert holder == {"ok": True}
     assert agent._notification_live_holder is None
+
+
 # ---------------------------------------------------------------------------
+# Idle-only channels (post-molt) must NOT be delivered via active stamping.
+# Regression for the post-molt continuation bug: the continuation is written
+# while the agent is still ACTIVE inside the psyche.molt tool call; if it were
+# stamped onto the molt tool result (and its fingerprint committed), the later
+# IDLE _sync_notifications pass would see no change and never inject the
+# synthesized system(notification) + MSG_TC_WAKE that actually wakes the agent.
+# ---------------------------------------------------------------------------
+
+
+def _write_post_molt_notif(tmp_path):
+    notif_dir = tmp_path / ".notification"
+    notif_dir.mkdir(parents=True, exist_ok=True)
+    (notif_dir / "post-molt.json").write_text(
+        '{"header": "post-molt #1 — resume work", "icon": "🌱", '
+        '"priority": "high", "data": {"molt_count": 1, '
+        '"reminder": "continue the task"}}'
+    )
+
+
+def test_attach_skips_post_molt_only_and_leaves_fp_uncommitted(tmp_path):
+    """When the ONLY active channel is post-molt, nothing is stamped and the
+    fingerprint stays uncommitted so the IDLE path still injects the wake."""
+    _write_post_molt_notif(tmp_path)
+    agent = _notif_agent(tmp_path)
+    sentinel_fp = (("sentinel.json", 1, 1),)
+    agent._notification_fp = sentinel_fp
+
+    block = ToolResultBlock(id="t1", name="x", content={"ok": True})
+    result = attach_active_notifications(agent, [block], prior_holder=None)
+
+    # No stamping happened on the molt/tool result.
+    assert result is None
+    assert "notifications" not in block.content
+    assert "_notification_guidance" not in block.content
+    # Fingerprint untouched → IDLE _sync_notifications will see a change and
+    # inject the synthesized pair + MSG_TC_WAKE.
+    assert agent._notification_fp == sentinel_fp
+
+
+def test_attach_excludes_post_molt_but_stamps_ordinary_channel(tmp_path):
+    """A mixed batch (email + post-molt): the ordinary channel is stamped, but
+    post-molt is neither stamped nor folded into the committed fingerprint."""
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    _write_email_notif(tmp_path)
+    _write_post_molt_notif(tmp_path)
+    agent = _notif_agent(tmp_path)
+
+    block = ToolResultBlock(id="t1", name="x", content={"ok": True})
+    holder = attach_active_notifications(agent, [block], prior_holder=None)
+
+    # Ordinary channel stamped; post-molt deliberately absent from the stamp.
+    assert holder is block.content
+    assert "email" in block.content["notifications"]
+    assert "post-molt" not in block.content["notifications"]
+
+    # The committed fp EXCLUDES post-molt, so it differs from the full
+    # fingerprint the IDLE path computes — guaranteeing IDLE delivery of the
+    # continuation.
+    full_fp = notification_fingerprint(tmp_path)
+    assert any(name == "post-molt.json" for name, _, _ in full_fp)
+    assert agent._notification_fp != full_fp
+    assert all(name != "post-molt.json" for name, _, _ in agent._notification_fp)
+    # And the committed fp still covers the ordinary channel we stamped.
+    assert any(name == "email.json" for name, _, _ in agent._notification_fp)
+
+
+def test_fingerprint_excluding_idle_only_drops_post_molt_keeps_others(tmp_path):
+    from lingtai_kernel.meta_block import _fingerprint_excluding_idle_only
+    from lingtai_kernel.notifications import notification_fingerprint
+
+    _write_email_notif(tmp_path)
+    _write_post_molt_notif(tmp_path)
+
+    excl = _fingerprint_excluding_idle_only(tmp_path)
+    full = notification_fingerprint(tmp_path)
+    excl_names = {name for name, _, _ in excl}
+    full_names = {name for name, _, _ in full}
+    assert "email.json" in excl_names
+    assert "post-molt.json" not in excl_names
+    assert full_names == {"email.json", "post-molt.json"}
+    # When no idle-only channel is present, the two fingerprints agree
+    # (ordinary-channel behavior is unchanged).
+    (tmp_path / ".notification" / "post-molt.json").unlink()
+    assert _fingerprint_excluding_idle_only(tmp_path) == notification_fingerprint(tmp_path)
+
+
+def test_idle_only_channels_contains_post_molt():
+    from lingtai_kernel.meta_block import IDLE_ONLY_NOTIFICATION_CHANNELS
+    # Mirror of psyche._molt._POST_MOLT_CHANNEL — keep them in sync.
+    from lingtai_kernel.intrinsics.psyche._molt import _POST_MOLT_CHANNEL
+    assert _POST_MOLT_CHANNEL in IDLE_ONLY_NOTIFICATION_CHANNELS
