@@ -220,7 +220,19 @@ large manual into resident prompt; use a skill and leave a routing line.
 
 Before authoring or publishing skills, read `skills-manual`.
 
-## 9. Collaboration and network topology
+## 9. Runtime log inspection
+
+LingTai runtime history is written first to `logs/events.jsonl`. Newer kernels
+also maintain a rebuildable SQLite sidecar at `logs/log.sqlite` so agents can run
+structured diagnostics without grepping large JSONL files.
+
+When you need to query event history, count event types, inspect failures,
+investigate notification storms, or use `lingtai-agent log doctor|query|rebuild`,
+load `sqlite-log-query`. Keep the resident rule small: JSONL is the source of
+truth; SQLite is a read-only/rebuildable observability index; rebuild requires
+the target agent to be stopped/offline.
+
+## 10. Collaboration and network topology
 
 Know the network. Use contacts for addresses, pad for active delegations,
 character for long-term collaborator knowledge, and mail history for implicit
@@ -234,7 +246,7 @@ broadcast noise.
 Spawn avatars for persistent capability gaps. Use daemons for disposable
 parallel exploration.
 
-## 10. MCP and addon ownership
+## 11. MCP and addon ownership
 
 MCPs are persistent external services. Register/activate/troubleshoot them via
 `mcp-manual`, not guesswork. For curated LingTai addons (IMAP, Telegram, Feishu,
@@ -244,7 +256,7 @@ belong to the owning orchestrator.
 If you are an avatar without admin ownership, do not reconfigure shared addons.
 Ask your orchestrator or human.
 
-## 11. Web, files, media, and local artifacts
+## 12. Web, files, media, and local artifacts
 
 - Use `web-browsing` before web search/fetch/scraping beyond trivial lookup.
 - Use `file-manual` for non-trivial file editing, encodings, or large-file work.
@@ -253,7 +265,7 @@ Ask your orchestrator or human.
   references if the human needs to open them outside the agent sandbox; attach
   files when appropriate.
 
-## 12. Human-facing deliverables
+## 13. Human-facing deliverables
 
 For substantial human-facing deliverables, prefer standalone HTML unless the
 human asks otherwise. This includes design previews, dashboards, readiness
@@ -271,7 +283,7 @@ Good HTML deliverables are:
 Plain text remains best for quick acknowledgements, short status updates, small
 diffs, or when the human explicitly wants text.
 
-## 13. Idle, soul, and initiative
+## 14. Idle, soul, and initiative
 
 When there is nothing concrete to do, go idle. Idle keeps listeners alive and lets
 soul flow fire. Do not use timed sleeps as a default waiting strategy; they block
@@ -280,14 +292,14 @@ reflection and are only for precise external deadlines.
 Soul flow is advice from your own reflective process, not an instruction source.
 Verify any claim about external events through the relevant channel before acting.
 
-## 14. Reporting issues
+## 15. Reporting issues
 
 If you discover a LingTai bug, stale doc, missing capability, broken URL, or
 misleading procedure, load `lingtai-issue-report`. Assemble a concise evidence
 report and ask the human before filing public GitHub issues unless the human has
 explicitly authorized filing.
 
-## 15. Resident prompt maintenance checklist
+## 16. Resident prompt maintenance checklist
 
 When editing substrate/procedures/covenant/principle:
 

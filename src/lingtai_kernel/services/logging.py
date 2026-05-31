@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import shutil
 import sqlite3
 import tempfile
@@ -133,7 +132,12 @@ class SQLiteEventIndex:
             raise sqlite3.Error(self._disabled_reason)
         if self._conn is None:
             if read_only:
-                uri = f"{self.path.resolve().as_uri()}?mode=ro&immutable=1"
+                # Use a WAL-aware read-only connection for live sidecars, but keep
+                # immutable inspection for checkpointed/offline sidecars so doctor/query
+                # do not create empty -wal/-shm files as a read side effect.
+                has_wal_sidecar = self.path.with_name(self.path.name + "-wal").exists() or self.path.with_name(self.path.name + "-shm").exists()
+                suffix = "?mode=ro" if has_wal_sidecar else "?mode=ro&immutable=1"
+                uri = f"{self.path.resolve().as_uri()}{suffix}"
                 conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
             else:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,8 +252,8 @@ class SQLiteEventIndex:
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
         statement = sql.lstrip().split(None, 1)[0].lower() if sql.strip() else ""
-        if statement != "select":
-            raise ValueError("log query only accepts SELECT statements")
+        if statement not in {"select", "with", "explain"}:
+            raise ValueError("log query only accepts read-only SELECT/WITH/EXPLAIN statements")
         with self._lock:
             conn = self._ensure_open(read_only=True, ensure_schema=False)
             conn.execute("PRAGMA query_only=ON")
@@ -342,10 +346,11 @@ def rebuild_sqlite_event_index(
     logs_dir = agent_dir / "logs"
     source = Path(jsonl_path).resolve() if jsonl_path is not None else (logs_dir / DEFAULT_JSONL_NAME).resolve()
     target = Path(sqlite_path).resolve() if sqlite_path is not None else (logs_dir / DEFAULT_SQLITE_NAME).resolve()
+    if not agent_dir.is_dir():
+        raise FileNotFoundError(f"agent directory not found: {agent_dir}")
     if not source.is_file():
         raise FileNotFoundError(f"events JSONL not found: {source}")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
     workdir_lock = None
     lock_owner = agent_dir
     try:
@@ -357,6 +362,7 @@ def rebuild_sqlite_event_index(
             f"could not acquire rebuild lock for {lock_owner}: {exc}"
         ) from exc
 
+    target.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(tempfile.mkdtemp(prefix="log-sqlite-rebuild-", dir=str(target.parent)))
     tmp_db = tmp_dir / target.name
     count = 0

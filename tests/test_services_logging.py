@@ -377,6 +377,81 @@ class TestSQLiteEventIndex:
         assert not (logs / "log.sqlite-wal").exists()
         assert not (logs / "log.sqlite-shm").exists()
 
+
+    def test_read_only_query_sees_live_wal_rows(self, tmp_path):
+        sqlite_file = tmp_path / "logs" / "log.sqlite"
+        index = SQLiteEventIndex(sqlite_file, keep_open=True)
+        try:
+            index.log_event({"type": "live_wal", "ts": 1})
+            rows = query_sqlite_event_index(tmp_path, "SELECT type FROM events WHERE type='live_wal'")
+            assert rows == [{"type": "live_wal"}]
+
+            doctor = doctor_sqlite_event_index(tmp_path)
+            assert doctor["status"] == "ok"
+            assert doctor["event_count"] == 1
+        finally:
+            index.close()
+
+    def test_query_accepts_read_only_cte_and_explain(self, tmp_path):
+        index = SQLiteEventIndex(tmp_path / "logs" / "log.sqlite")
+        try:
+            index.log_event({"type": "cte", "ts": 1})
+            rows = query_sqlite_event_index(
+                tmp_path,
+                "WITH recent AS (SELECT type FROM events) SELECT type FROM recent",
+            )
+            assert rows == [{"type": "cte"}]
+
+            plan = query_sqlite_event_index(tmp_path, "EXPLAIN QUERY PLAN SELECT type FROM events")
+            assert plan
+        finally:
+            index.close()
+
+    def test_rebuild_missing_agent_dir_does_not_materialize_path(self, tmp_path):
+        missing = tmp_path / "missing-agent"
+        try:
+            rebuild_sqlite_event_index(missing)
+            assert False, "missing agent dir should fail before lock setup"
+        except FileNotFoundError as exc:
+            assert "agent directory not found" in str(exc)
+        assert not missing.exists()
+
+    def test_rebuild_preserves_runtime_rows_without_duplicates(self, tmp_path):
+        log_file = tmp_path / "logs" / "events.jsonl"
+        sqlite_file = tmp_path / "logs" / "log.sqlite"
+        svc = CompositeLoggingService(
+            JSONLLoggingService(log_file),
+            sqlite_index=SQLiteEventIndex(sqlite_file, keep_open=False),
+        )
+        svc.log({"type": "first", "ts": 1})
+        svc.log({"type": "second", "ts": 2})
+        svc.close()
+
+        assert query_sqlite_event_index(tmp_path, "SELECT COUNT(*) AS n FROM events") == [{"n": 2}]
+        result = rebuild_sqlite_event_index(tmp_path)
+        assert result["event_count"] == 2
+        rows = query_sqlite_event_index(tmp_path, "SELECT type FROM events ORDER BY ts")
+        assert rows == [{"type": "first"}, {"type": "second"}]
+
+    def test_fail_open_continues_jsonl_logging_after_sidecar_disable(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        index = SQLiteEventIndex(tmp_path / "log.sqlite")
+        svc = CompositeLoggingService(JSONLLoggingService(log_file), sqlite_index=index)
+
+        svc.log({"type": "bad_ts", "ts": "not-a-float"})
+        for i in range(3):
+            svc.log({"type": f"after_disable_{i}", "ts": i})
+        svc.close()
+
+        events = [json.loads(line) for line in log_file.read_text().splitlines()]
+        assert [event["type"] for event in events] == [
+            "bad_ts",
+            "after_disable_0",
+            "after_disable_1",
+            "after_disable_2",
+        ]
+        assert index.disabled_reason is not None
+
     def test_rebuild_requires_offline_agent_lock(self, tmp_path):
         from lingtai_kernel.workdir import WorkingDir
 
