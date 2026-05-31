@@ -240,6 +240,45 @@ def run(working_dir: Path) -> None:
             pass
 
 
+def _emit_json(data: object) -> None:
+    print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+
+
+def _handle_log_command(args) -> None:
+    from lingtai_kernel.services.logging import (
+        doctor_sqlite_event_index,
+        query_sqlite_event_index,
+        rebuild_sqlite_event_index,
+    )
+
+    agent_dir = args.agent_dir.resolve()
+    if not agent_dir.is_dir():
+        print(f"error: {agent_dir} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    if args.log_command == "rebuild":
+        try:
+            _emit_json(rebuild_sqlite_event_index(agent_dir))
+        except Exception as e:
+            print(f"error: failed to rebuild sqlite log index: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.log_command == "doctor":
+        try:
+            _emit_json(doctor_sqlite_event_index(agent_dir))
+        except Exception as e:
+            print(f"error: failed to inspect sqlite log index: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.log_command == "query":
+        try:
+            _emit_json(query_sqlite_event_index(agent_dir, args.sql))
+        except Exception as e:
+            print(f"error: failed to query sqlite log index: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("error: missing log subcommand", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="lingtai-agent",
@@ -252,6 +291,19 @@ def main() -> None:
 
     sub.add_parser("check-caps", help="Output capability provider metadata as JSON")
 
+    log_parser = sub.add_parser("log", help="Inspect the additive SQLite log index")
+    log_sub = log_parser.add_subparsers(dest="log_command", required=True)
+
+    log_rebuild = log_sub.add_parser("rebuild", help="Rebuild logs/log.sqlite from logs/events.jsonl")
+    log_rebuild.add_argument("agent_dir", type=Path, help="Agent working directory")
+
+    log_doctor = log_sub.add_parser("doctor", help="Check logs/log.sqlite integrity and counts")
+    log_doctor.add_argument("agent_dir", type=Path, help="Agent working directory")
+
+    log_query = log_sub.add_parser("query", help="Run a read-only SQL query against logs/log.sqlite")
+    log_query.add_argument("agent_dir", type=Path, help="Agent working directory")
+    log_query.add_argument("sql", help="SQL query to execute")
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -263,6 +315,8 @@ def main() -> None:
     elif args.command == "check-caps":
         from lingtai.capabilities import get_all_providers
         print(json.dumps(get_all_providers()))
+    elif args.command == "log":
+        _handle_log_command(args)
     else:
         parser.print_help()
         sys.exit(1)
