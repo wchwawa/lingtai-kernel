@@ -252,6 +252,17 @@ class TestSQLiteEventIndex:
         assert json.loads(log_file.read_text().strip())["type"] == "test"
         assert index.disabled_reason == "simulated"
 
+    def test_sqlite_sidecar_fail_open_for_normalization_errors(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        index = SQLiteEventIndex(tmp_path / "log.sqlite")
+        svc = CompositeLoggingService(JSONLLoggingService(log_file), sqlite_index=index)
+
+        svc.log({"type": "bad_ts", "ts": "not-a-float"})
+        svc.close()
+
+        assert json.loads(log_file.read_text().strip())["type"] == "bad_ts"
+        assert index.disabled_reason is not None
+
     def test_query_rejects_mutating_sql(self, tmp_path):
         index = SQLiteEventIndex(tmp_path / "log.sqlite")
         try:
@@ -330,3 +341,55 @@ class TestSQLiteEventIndex:
         assert sqlite_file.is_file()
         rows = query_sqlite_event_index(agent.working_dir, "SELECT type FROM events WHERE type='custom'")
         assert rows == [{"type": "custom"}]
+
+    def test_query_missing_sqlite_requires_explicit_rebuild(self, tmp_path):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "events.jsonl").write_text(json.dumps({"type": "alpha", "ts": 1}) + "\n", encoding="utf-8")
+
+        try:
+            query_sqlite_event_index(tmp_path, "SELECT type FROM events")
+            assert False, "query should require explicit rebuild when sqlite sidecar is missing"
+        except FileNotFoundError as exc:
+            assert "rebuild" in str(exc)
+        assert not (logs / "log.sqlite").exists()
+
+    def test_doctor_missing_sqlite_is_read_only(self, tmp_path):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        result = doctor_sqlite_event_index(tmp_path)
+        assert result["status"] == "missing"
+        assert not (logs / "log.sqlite").exists()
+
+    def test_doctor_existing_sqlite_does_not_create_wal_or_mutate_mtime(self, tmp_path):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "events.jsonl").write_text(json.dumps({"type": "alpha", "ts": 1}) + "\n", encoding="utf-8")
+        rebuild_sqlite_event_index(tmp_path)
+        sqlite_file = logs / "log.sqlite"
+        before_mtime = sqlite_file.stat().st_mtime_ns
+        for suffix in ("-wal", "-shm"):
+            (logs / ("log.sqlite" + suffix)).unlink(missing_ok=True)
+
+        result = doctor_sqlite_event_index(tmp_path)
+        assert result["status"] == "ok"
+        assert sqlite_file.stat().st_mtime_ns == before_mtime
+        assert not (logs / "log.sqlite-wal").exists()
+        assert not (logs / "log.sqlite-shm").exists()
+
+    def test_rebuild_requires_offline_agent_lock(self, tmp_path):
+        from lingtai_kernel.workdir import WorkingDir
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "events.jsonl").write_text(json.dumps({"type": "alpha", "ts": 1}) + "\n", encoding="utf-8")
+        lock = WorkingDir(tmp_path)
+        lock.acquire_lock(timeout=0)
+        try:
+            try:
+                rebuild_sqlite_event_index(tmp_path)
+                assert False, "rebuild should require offline lock"
+            except RuntimeError as exc:
+                assert "stopped/offline" in str(exc)
+        finally:
+            lock.release_lock()

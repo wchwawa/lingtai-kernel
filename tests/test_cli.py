@@ -345,3 +345,26 @@ def test_log_rebuild_doctor_query_cli(tmp_path, capsys):
         assert query_out == [{"type": "cli_event"}]
     finally:
         sys.argv = old_argv
+
+
+def test_log_query_missing_sqlite_requires_rebuild_cli(tmp_path, capsys):
+    from lingtai.cli import main
+    import sys
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events.jsonl").write_text(json.dumps({"type": "cli_event", "ts": 1}) + "\n", encoding="utf-8")
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["lingtai-agent", "log", "query", str(tmp_path), "SELECT type FROM events"]
+        try:
+            main()
+            assert False, "query should exit when sqlite sidecar is missing"
+        except SystemExit as exc:
+            assert exc.code == 1
+        captured = capsys.readouterr()
+        assert "rebuild" in captured.err
+        assert not (logs / "log.sqlite").exists()
+    finally:
+        sys.argv = old_argv

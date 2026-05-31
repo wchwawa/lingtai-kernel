@@ -6,7 +6,9 @@ truth; ``logs/log.sqlite`` exists to make history queryable.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -15,6 +17,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from ..workdir import WorkingDir
 
 
 SCHEMA_VERSION = 1
@@ -124,15 +128,22 @@ class SQLiteEventIndex:
     def disabled_reason(self) -> str | None:
         return self._disabled_reason
 
-    def _ensure_open(self) -> sqlite3.Connection:
+    def _ensure_open(self, *, read_only: bool = False, ensure_schema: bool = True) -> sqlite3.Connection:
         if self._disabled_reason:
             raise sqlite3.Error(self._disabled_reason)
         if self._conn is None:
-            conn = sqlite3.connect(self.path, check_same_thread=False)
+            if read_only:
+                uri = f"{self.path.resolve().as_uri()}?mode=ro&immutable=1"
+                conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            else:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(self.path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             self._conn = conn
-            self._configure(conn)
-            self._ensure_schema(conn)
+            if not read_only:
+                self._configure(conn)
+            if ensure_schema:
+                self._ensure_schema(conn)
         return self._conn
 
     @staticmethod
@@ -226,7 +237,10 @@ class SQLiteEventIndex:
                     self.event_row(event, source_file=source_file, source_offset=source_offset),
                 )
                 conn.commit()
-        except (OSError, sqlite3.Error) as exc:
+        except Exception as exc:
+            # The SQLite sidecar is derived from JSONL.  Any sidecar failure —
+            # sqlite errors, path errors, or row-normalization surprises — must
+            # fail open and never break the agent turn after JSONL succeeded.
             self.disable(str(exc))
         finally:
             if not self._keep_open:
@@ -237,30 +251,22 @@ class SQLiteEventIndex:
         if statement != "select":
             raise ValueError("log query only accepts SELECT statements")
         with self._lock:
-            conn = self._ensure_open()
-            original_factory = conn.row_factory
+            conn = self._ensure_open(read_only=True, ensure_schema=False)
+            conn.execute("PRAGMA query_only=ON")
             try:
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA query_only=ON")
-                before_changes = conn.total_changes
                 cur = conn.execute(sql, tuple(params))
                 if cur.description is None:
                     return []
-                rows = [dict(row) for row in cur.fetchall()]
-                if conn.total_changes != before_changes:
-                    raise ValueError("log query must not modify the sqlite index")
-                return rows
+                return [dict(row) for row in cur.fetchall()]
             finally:
-                try:
+                with contextlib.suppress(sqlite3.Error):
                     conn.execute("PRAGMA query_only=OFF")
-                finally:
-                    conn.row_factory = original_factory
 
     def doctor(self) -> dict[str, Any]:
         if self._disabled_reason:
             return {"status": "disabled", "path": str(self.path), "reason": self._disabled_reason}
         with self._lock:
-            conn = self._ensure_open()
+            conn = self._ensure_open(read_only=True, ensure_schema=False)
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
             event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             cursor_count = conn.execute("SELECT COUNT(*) FROM import_cursors").fetchone()[0]
@@ -332,14 +338,25 @@ def rebuild_sqlite_event_index(
     sqlite_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Rebuild ``logs/log.sqlite`` from ``logs/events.jsonl`` atomically."""
-    agent_dir = Path(agent_dir)
+    agent_dir = Path(agent_dir).resolve()
     logs_dir = agent_dir / "logs"
-    source = Path(jsonl_path) if jsonl_path is not None else logs_dir / DEFAULT_JSONL_NAME
-    target = Path(sqlite_path) if sqlite_path is not None else logs_dir / DEFAULT_SQLITE_NAME
+    source = Path(jsonl_path).resolve() if jsonl_path is not None else (logs_dir / DEFAULT_JSONL_NAME).resolve()
+    target = Path(sqlite_path).resolve() if sqlite_path is not None else (logs_dir / DEFAULT_SQLITE_NAME).resolve()
     if not source.is_file():
         raise FileNotFoundError(f"events JSONL not found: {source}")
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    workdir_lock = None
+    lock_owner = agent_dir
+    try:
+        workdir_lock = WorkingDir(lock_owner)
+        workdir_lock.acquire_lock(timeout=0)
+    except Exception as exc:
+        raise RuntimeError(
+            "sqlite log rebuild requires the agent to be stopped/offline; "
+            f"could not acquire rebuild lock for {lock_owner}: {exc}"
+        ) from exc
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="log-sqlite-rebuild-", dir=str(target.parent)))
     tmp_db = tmp_dir / target.name
     count = 0
@@ -384,6 +401,9 @@ def rebuild_sqlite_event_index(
         return {"status": "ok", "source": str(source), "target": str(target), "event_count": count, "line_no": last_line, "byte_offset": last_offset}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        if workdir_lock is not None:
+            with contextlib.suppress(Exception):
+                workdir_lock.release_lock()
 
 
 def doctor_sqlite_event_index(agent_dir: Path | str, *, sqlite_path: Path | str | None = None) -> dict[str, Any]:
@@ -391,7 +411,7 @@ def doctor_sqlite_event_index(agent_dir: Path | str, *, sqlite_path: Path | str 
     target = Path(sqlite_path) if sqlite_path is not None else agent_dir / "logs" / DEFAULT_SQLITE_NAME
     if not target.is_file():
         return {"status": "missing", "path": str(target)}
-    index = SQLiteEventIndex(target)
+    index = SQLiteEventIndex(target, ensure=False)
     try:
         return index.doctor()
     finally:
@@ -402,8 +422,8 @@ def query_sqlite_event_index(agent_dir: Path | str, sql: str, *, sqlite_path: Pa
     agent_dir = Path(agent_dir)
     target = Path(sqlite_path) if sqlite_path is not None else agent_dir / "logs" / DEFAULT_SQLITE_NAME
     if not target.is_file():
-        rebuild_sqlite_event_index(agent_dir, sqlite_path=target)
-    index = SQLiteEventIndex(target)
+        raise FileNotFoundError(f"sqlite log index not found: {target}; run `lingtai-agent log rebuild {agent_dir}` first")
+    index = SQLiteEventIndex(target, ensure=False)
     try:
         return index.query(sql)
     finally:

@@ -15,7 +15,7 @@ Kernel-side service ABCs and implementations. Services back cross-cutting kernel
 - `services/logging.py` — structured event log and additive SQLite query index.
   - `LoggingService` is the ABC for `log(event)` and `close()`; `log()` may return optional storage metadata such as JSONL offsets (`services/logging.py:29`, `services/logging.py:36-42`).
   - `JSONLLoggingService` appends UTF-8 JSON lines with a lock and flush per write, returning `(source_file, source_offset)` metadata (`services/logging.py:48`, `services/logging.py:57-58`, `services/logging.py:66-77`).
-  - `SQLiteEventIndex` owns the derived `logs/log.sqlite` schema and fail-open sidecar writes (`services/logging.py:99`, `services/logging.py:145-182`, `services/logging.py:213-233`).
+  - `SQLiteEventIndex` owns the derived `logs/log.sqlite` schema, fail-open sidecar writes, and immutable read-only inspection opens (`services/logging.py:99`, `services/logging.py:145-182`, `services/logging.py:213-233`).
   - `CompositeLoggingService` writes the JSONL primary first, then best-effort inserts into SQLite with the JSONL source offset (`services/logging.py:265`, `services/logging.py:271-285`).
   - `rebuild_sqlite_event_index()`, `doctor_sqlite_event_index()`, and `query_sqlite_event_index()` back the CLI rebuild/doctor/query commands (`services/logging.py:315`, `services/logging.py:376`, `services/logging.py:388`).
 - `services/__init__.py` is an empty package marker; callers import concrete modules directly.
@@ -46,5 +46,5 @@ Kernel-side service ABCs and implementations. Services back cross-cutting kernel
 - Pseudo-agent outbox claiming is optimistic concurrency: pollers copy to inbox, race on outbox→sent rename, and losers delete their speculative copy and clear `_seen` (`services/mail.py:326-354`).
 - The services package has two ABCs but mail and logging now differ in shape: mail still has one filesystem implementation, while logging composes the JSONL primary with optional derived indexes.
 - `get_events()` favors simplicity over hot-path performance: it re-opens and parses the whole JSONL file each call (`services/logging.py:79-94`).
-- SQLite is intentionally additive: JSONL remains the durable source of truth; rebuild uses a temporary database and atomic replace, and checkpoints WAL before replacing so the final artifact is self-contained (`services/logging.py:315-368`).
-- Query helpers accept only `SELECT` statements to keep the CLI inspection path read-only (`services/logging.py:235-244`).
+- SQLite is intentionally additive: JSONL remains the durable source of truth; rebuild requires the agent working-directory lock (offline/stopped agent), uses a temporary database and atomic replace, and checkpoints WAL before replacing so the final artifact is self-contained (`services/logging.py:315-368`).
+- Query helpers accept only `SELECT` statements and open the DB with SQLite `mode=ro&immutable=1` to keep the CLI inspection path read-only (`services/logging.py:235-244`).
