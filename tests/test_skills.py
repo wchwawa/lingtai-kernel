@@ -64,7 +64,13 @@ def test_skills_setup_hard_copies_intrinsics(tmp_path):
             workdir / ".library" / "intrinsic" / "capabilities" / "skills" / "SKILL.md"
         )
         assert skill_md.is_file()
-        assert "name: skills-manual" in skill_md.read_text()
+        body = skill_md.read_text(encoding="utf-8")
+        assert "name: skills-manual" in body
+        assert "Nested skill/reference pattern for umbrella manuals" in body
+        assert "Nested reference catalog" in body
+        assert "reference/substrate-manual/SKILL.md" in body
+        assert "The catalog scanner treats a directory that already" in body
+        assert "validate.py reference/topic-a/" in body
     finally:
         agent.stop(timeout=1.0)
 

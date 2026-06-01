@@ -21,12 +21,15 @@ description: >
     - You're adding a new skills path source (e.g. a project-specific
       utilities directory) by editing `init.json`'s
       `manifest.capabilities.skills.paths`.
+    - You're turning a large manual into a progressive-disclosure router
+      and need the nested skill/reference pattern.
 
   Covers: directory layout (`.library/{intrinsic,custom}/`), required vs
   optional frontmatter fields, name-collision discipline, when to author
   a skill and when not to, what makes a skill description trigger-friendly,
-  the validator's failure modes, and the relationship between the kernel's
-  intrinsic skill bundles and your editable `custom/` territory.
+  nested skill/reference catalogs, the validator's failure modes, and the
+  relationship between the kernel's intrinsic skill bundles and your
+  editable `custom/` territory.
 
   Does NOT cover: the bundled skills themselves — their READMEs and
   SKILL.md files document them. This is meta — how the skills *system*
@@ -177,6 +180,77 @@ For skills that bundle non-trivial domain knowledge (multi-topic references, dec
 When NOT to use this pattern: simple skills (single-API wrappers, linear checklists, prose-only references). A flat SKILL.md is correct when total content is under ~300 lines or there is only one path through it.
 
 Reference implementations: `huangzesen/laps-skill`, `huangzesen/helmholtz-skill`.
+
+### Nested skill/reference pattern for umbrella manuals
+
+Use this pattern when a parent skill is itself a **router** and some child
+references need to behave like mini-skills: their own frontmatter, trigger
+summary, future `scripts/` or `assets/`, and a stable addressable folder. This is
+for second-layer progressive disclosure inside one top-level catalog entry, not a
+way to hide unrelated reusable skills.
+
+```
+<parent-skill>/
+├── SKILL.md                         # Top-level cataloged router
+└── reference/
+    ├── topic-a/
+    │   └── SKILL.md                 # Nested reference, loaded only via parent
+    ├── topic-b/
+    │   └── SKILL.md
+    └── ...
+```
+
+Key rule: a nested `reference/<topic>/SKILL.md` is **not automatically promoted**
+to the global skills catalog. The catalog scanner treats a directory that already
+has `SKILL.md` as a skill boundary and does not descend into that folder for
+additional catalog entries. Therefore the parent `SKILL.md` must advertise the
+children explicitly, usually with a small YAML block such as:
+
+```yaml
+Nested reference catalog:
+  - name: topic-a
+    location: reference/topic-a/SKILL.md
+    description: >
+      Nested <parent-skill> reference for ... Read this after loading
+      <parent-skill> when ...
+```
+
+Use nested references when all of these are true:
+
+- callers should enter through one umbrella skill first;
+- the child topic is substantial enough to deserve frontmatter and possibly its
+  own `scripts/` or `assets/` later;
+- exposing the child as a standalone top-level skill would clutter the catalog or
+  bypass important routing context;
+- the parent can clearly say when to read each child.
+
+Do **not** use nested references for independent workflows that agents should
+find directly from the top-level catalog. Those should be normal skills under
+`.library/custom/<name>/`, `.library_shared/<name>/`, or an intrinsic skill root.
+
+Nested child conventions:
+
+- `name` should be unique within the parent and descriptive (`sqlite-log-query`,
+  `procedures-manual`), even though it is not globally cataloged.
+- `description` should start with the fact that it is nested, name the parent,
+  and give the trigger condition: `Nested system-manual reference for ...`.
+- `location` in the parent catalog should be relative to the parent folder so it
+  survives copy/install moves; agents reading the parent can resolve it next to
+  the parent `SKILL.md`.
+- The parent should remain the routing hub. Resident prompts and sibling skills
+  should route to the parent first, then to the nested reference; do not bypass
+  the parent unless the caller already has the parent context loaded.
+- Tests should verify both levels: the parent catalog/body mentions every nested
+  child, and the installed/copied skill tree contains each child `SKILL.md` with
+  valid frontmatter and key content.
+- The bundled validator checks one skill folder at a time. For nested children,
+  validate the parent and then validate each nested child folder directly, e.g.
+  `python3 .../validate.py reference/topic-a/` from the parent skill folder.
+
+Reference implementation: `system-manual` is a top-level router with nested
+`reference/substrate-manual/SKILL.md`, `reference/procedures-manual/SKILL.md`,
+and `reference/sqlite-log-query/SKILL.md`, advertised through a `Nested reference
+catalog` in the parent.
 
 ### SKILL.md vs README.md
 
