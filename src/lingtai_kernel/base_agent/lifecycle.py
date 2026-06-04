@@ -104,6 +104,11 @@ def _stop(agent, timeout: float = 5.0) -> None:
     Otherwise the file vanishes seconds before the Python process actually
     exits, and a quick relaunch races a still-living interpreter into the
     same workdir. See workdir-race investigation 2026-05-09.
+
+    Daemon resources are also reclaimed before liveness is withdrawn: daemon
+    ThreadPoolExecutor workers and external CLI process groups can otherwise
+    keep this interpreter visible in `ps` after heartbeat/lock are gone, which
+    makes refresh watchers race the duplicate-process guard.
     """
     from ..intrinsics.soul.flow import _cancel_soul_timer
 
@@ -112,6 +117,7 @@ def _stop(agent, timeout: float = 5.0) -> None:
     agent._shutdown.set()
     if agent._thread:
         agent._thread.join(timeout=timeout)
+    _shutdown_daemon_runtime(agent, reason="agent_stop")
     agent._session.close()
 
     # Stop MailService if configured
@@ -133,6 +139,37 @@ def _stop(agent, timeout: float = 5.0) -> None:
     agent._workdir.write_manifest(agent._build_manifest())
     _stop_heartbeat(agent)
     agent._workdir.release_lock()
+
+
+def _shutdown_daemon_runtime(agent, *, reason: str) -> None:
+    """Best-effort daemon cleanup before parent liveness is released."""
+    mgr = None
+    try:
+        get_capability = getattr(agent, "get_capability", None)
+        if callable(get_capability):
+            mgr = get_capability("daemon")
+        if mgr is None:
+            mgr = getattr(agent, "_capability_managers", {}).get("daemon")
+    except Exception as e:
+        try:
+            agent._log("daemon_lifecycle_lookup_failed", reason=reason, error=str(e))
+        except Exception:
+            pass
+        return
+
+    shutdown = getattr(mgr, "shutdown_for_agent_stop", None)
+    if not callable(shutdown):
+        return
+    try:
+        shutdown(reason=reason)
+    except Exception as e:
+        # Stop/refresh teardown must continue even if daemon cleanup races with
+        # already-finished workers. Keep heartbeat/lock alive until this point,
+        # log the failure, then proceed to the rest of stop.
+        try:
+            agent._log("daemon_lifecycle_shutdown_failed", reason=reason, error=str(e))
+        except Exception:
+            pass
 
 
 def _start_heartbeat(agent) -> None:
@@ -514,7 +551,7 @@ def _perform_refresh(agent) -> None:
     working_dir_str = str(working_dir)
     stderr_log = str(working_dir / "logs" / "refresh_relaunch.log")
     relaunch_script = (
-        "import time, subprocess, os, sys, json\n"
+        "import time, subprocess, os, sys, json, signal\n"
         f"taken = {taken_path!r}\n"
         f"lock = {lock_path!r}\n"
         f"events = {events_path!r}\n"
@@ -548,12 +585,71 @@ def _perform_refresh(agent) -> None:
         "    log('refresh_watcher_timeout', phase='lock')\n"
         "    sys.exit(1)\n"
         "# Phase 3: relaunch with health check and retry\n"
-        "def is_alive():\n"
+        "def heartbeat_age():\n"
         "    hb = os.path.join(wd, '.agent.heartbeat')\n"
         "    try:\n"
         "        hb_ts = float(open(hb).read().strip())\n"
-        "        return time.time() - hb_ts < 30\n"
+        "        return time.time() - hb_ts\n"
         "    except (ValueError, OSError):\n"
+        "        return None\n"
+        "def is_alive():\n"
+        "    age = heartbeat_age()\n"
+        "    return age is not None and age < 30\n"
+        "def _pid_cmd(pid):\n"
+        "    try:\n"
+        "        return subprocess.check_output(['ps', '-p', str(pid), '-o', 'command='],\n"
+        "            stderr=subprocess.DEVNULL, text=True).strip()\n"
+        "    except Exception:\n"
+        "        return ''\n"
+        "def _extract_duplicate_pid(stderr_tail):\n"
+        "    for line in stderr_tail.splitlines():\n"
+        "        line = line.strip()\n"
+        "        if not line.startswith('PID '):\n"
+        "            continue\n"
+        "        parts = line.split(None, 2)\n"
+        "        if len(parts) >= 2 and parts[1].rstrip(':').isdigit():\n"
+        "            return int(parts[1].rstrip(':'))\n"
+        "    return None\n"
+        "def _is_same_agent_run(pid):\n"
+        "    if not pid or pid == os.getpid():\n"
+        "        return False\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except OSError:\n"
+        "        return False\n"
+        "    cmdline = _pid_cmd(pid)\n"
+        "    return ('lingtai run ' + wd) in cmdline\n"
+        "def _cleanup_stale_duplicate(stderr_tail, attempt):\n"
+        "    pid = _extract_duplicate_pid(stderr_tail)\n"
+        "    if not _is_same_agent_run(pid):\n"
+        "        return False\n"
+        "    age = heartbeat_age()\n"
+        "    if age is not None and age < 60:\n"
+        "        log('refresh_watcher_duplicate_alive', attempt=attempt, pid=pid, heartbeat_age=age)\n"
+        "        return False\n"
+        "    log('refresh_watcher_stale_duplicate_terminate', attempt=attempt, pid=pid,\n"
+        "        heartbeat_age=age, cmdline=_pid_cmd(pid)[-300:])\n"
+        "    try:\n"
+        "        os.kill(pid, signal.SIGTERM)\n"
+        "    except OSError as e:\n"
+        "        log('refresh_watcher_stale_duplicate_term_error', attempt=attempt,\n"
+        "            pid=pid, error=str(e))\n"
+        "        return False\n"
+        "    deadline = time.time() + 5\n"
+        "    while time.time() < deadline:\n"
+        "        try:\n"
+        "            os.kill(pid, 0)\n"
+        "        except OSError:\n"
+        "            log('refresh_watcher_stale_duplicate_gone', attempt=attempt, pid=pid)\n"
+        "            return True\n"
+        "        time.sleep(0.2)\n"
+        "    try:\n"
+        "        os.kill(pid, signal.SIGKILL)\n"
+        "        log('refresh_watcher_stale_duplicate_killed', attempt=attempt, pid=pid)\n"
+        "        return True\n"
+        "    except OSError as e:\n"
+        "        log('refresh_watcher_stale_duplicate_kill_error', attempt=attempt,\n"
+        "            pid=pid, error=str(e))\n"
         "        return False\n"
         "for attempt in range(1, MAX_ATTEMPTS + 1):\n"
         "    # Check if already alive before relaunching\n"
@@ -601,6 +697,8 @@ def _perform_refresh(agent) -> None:
         "        pass\n"
         "    log('refresh_watcher_relaunch_dead', attempt=attempt, pid=proc.pid,\n"
         "        stderr_tail=stderr_tail[-500:])\n"
+        "    if 'another lingtai agent is already running' in stderr_tail:\n"
+        "        _cleanup_stale_duplicate(stderr_tail, attempt)\n"
         "log('refresh_failed_permanent', attempts=MAX_ATTEMPTS)\n"
     )
     watcher_env = {**os.environ, "LINGTAI_REFRESH_ENV_OVERWRITE": "1"}
