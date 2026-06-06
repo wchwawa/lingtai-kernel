@@ -130,7 +130,7 @@ def _enqueue_system_notification(agent, *, source: str, ref_id: str, body: str) 
 
     The merge is read-modify-write on the same file, so concurrent
     arrivals (e.g. a burst of bounces) need a per-agent lock to avoid
-    losing writes.  The lock is created lazily on first use; only
+    losing writes.  The lock is initialized by ``BaseAgent``; only
     ``system.json`` needs it because ``email.json`` and ``soul.json``
     recompute full state on every publish (no merge).
 
@@ -146,7 +146,6 @@ def _enqueue_system_notification(agent, *, source: str, ref_id: str, body: str) 
         per-id lifecycle under the new model).
     """
     import secrets
-    import threading
     from datetime import datetime, timezone
     from ..notifications import collect_notifications
     from ..intrinsics.system import publish_notification
@@ -154,13 +153,7 @@ def _enqueue_system_notification(agent, *, source: str, ref_id: str, body: str) 
     event_id = f"evt_{int(time.time()*1000):x}_{secrets.token_hex(2)}"
     received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Lazy per-agent lock for the read-modify-write merge.  Stored as
-    # a plain attribute since BaseAgent doesn't declare it (only
-    # `system.json` needs this; other producers don't merge).
-    lock = getattr(agent, "_system_notification_lock", None)
-    if lock is None:
-        lock = threading.Lock()
-        agent._system_notification_lock = lock
+    lock = agent._system_notification_lock
 
     with lock:
         current = collect_notifications(agent._working_dir).get("system", {})
