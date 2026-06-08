@@ -444,6 +444,9 @@ class BaseAgent:
         #   skeletonized in-place, not deleted).
         # See notifications.py and notification-filesystem-redesign.md.
         self._notification_fp: tuple = ()
+        # Protects read-modify-write updates and guarded clears for the
+        # shared `.notification/system.json` channel.
+        self._system_notification_lock: threading.Lock = threading.Lock()
         # Last ACTIVE-state notification fingerprint that has already emitted
         # ``notification_deferred_active``.  This is intentionally separate
         # from ``_notification_fp``: ACTIVE must keep the delivery fingerprint

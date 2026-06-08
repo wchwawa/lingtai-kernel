@@ -161,6 +161,69 @@ def clear_with_result(workdir: Path, channel: str) -> bool:
     return True
 
 
+def _channel_fingerprint_entry(fp: tuple | None, channel: str) -> tuple | None:
+    """Return one channel's fingerprint entry from a directory fingerprint."""
+    filename = f"{channel}.json"
+    for entry in fp or ():
+        try:
+            if entry[0] == filename:
+                return tuple(entry)
+        except (IndexError, TypeError):
+            continue
+    return None
+
+
+def _safe_version(entry: tuple | None) -> list | None:
+    """Return a JSON/log-safe fingerprint representation."""
+    return list(entry) if entry is not None else None
+
+
+def _stale_channel_refusal(
+    agent,
+    channel: str,
+    *,
+    invoked_by: str,
+    delivered: tuple | None,
+    current: tuple,
+) -> dict:
+    delivered_version = _safe_version(delivered)
+    current_version = _safe_version(current)
+    try:
+        agent._log(
+            "notification_dismiss_refused",
+            reason="stale_channel_version",
+            channel=channel,
+            invoked_by=invoked_by,
+            forced=False,
+            delivered_version=delivered_version,
+            current_version=current_version,
+        )
+        if invoked_by == "system":
+            agent._log(
+                "system_dismiss_refused",
+                reason="stale_channel_version",
+                channel=channel,
+                forced=False,
+                delivered_version=delivered_version,
+                current_version=current_version,
+            )
+    except Exception:
+        pass
+    return {
+        "status": "error",
+        "reason": "stale_channel_version",
+        "channel": channel,
+        "forced": False,
+        "delivered_version": delivered_version,
+        "current_version": current_version,
+        "message": (
+            f"Channel '{channel}' changed after the delivered notification "
+            "version. Read the current notification state before dismissing, "
+            "or pass force=true to knowingly clear it."
+        ),
+    }
+
+
 def dismiss_channel(
     agent,
     channel: str,
@@ -247,64 +310,89 @@ def dismiss_channel(
             ),
         }
 
-    try:
-        existed = clear_with_result(agent._working_dir, channel)
-    except OSError as e:
+    def _clear_current_channel() -> dict:
+        if not force:
+            fp = notification_fingerprint(agent._working_dir)
+            current = _channel_fingerprint_entry(fp, channel)
+            if current is not None:
+                delivered = _channel_fingerprint_entry(
+                    getattr(agent, "_notification_fp", ()),
+                    channel,
+                )
+                if delivered != current:
+                    return _stale_channel_refusal(
+                        agent,
+                        channel,
+                        invoked_by=invoked_by,
+                        delivered=delivered,
+                        current=current,
+                    )
+
+        try:
+            existed = clear_with_result(agent._working_dir, channel)
+        except OSError as e:
+            try:
+                agent._log(
+                    "notification_dismiss_error",
+                    channel=channel,
+                    invoked_by=invoked_by,
+                    forced=bool(force),
+                    error=str(e)[:200],
+                )
+            except Exception:
+                pass
+            return {
+                "status": "error",
+                "reason": "clear_failed",
+                "channel": channel,
+                "message": str(e),
+            }
+
+        # Any pending ACTIVE-state payload may contain the dismissed channel.
+        # Invalidate after a successful clear attempt; stale refusals above
+        # leave newer notification state intact for later delivery.
+        if hasattr(agent, "_pending_notification_meta"):
+            agent._pending_notification_meta = None
+        if hasattr(agent, "_pending_notification_fp"):
+            agent._pending_notification_fp = None
+
         try:
             agent._log(
-                "notification_dismiss_error",
+                "notification_dismiss",
                 channel=channel,
                 invoked_by=invoked_by,
-                forced=bool(force),
-                error=str(e)[:200],
-            )
-        except Exception:
-            pass
-        return {
-            "status": "error",
-            "reason": "clear_failed",
-            "channel": channel,
-            "message": str(e),
-        }
-
-    # Any pending ACTIVE-state payload may contain the dismissed channel.
-    # Invalidate unconditionally; the next sync rebuilds from disk.
-    if hasattr(agent, "_pending_notification_meta"):
-        agent._pending_notification_meta = None
-    if hasattr(agent, "_pending_notification_fp"):
-        agent._pending_notification_fp = None
-
-    try:
-        agent._log(
-            "notification_dismiss",
-            channel=channel,
-            invoked_by=invoked_by,
-            existed=existed,
-            forced=bool(force),
-            reason=ack_reason or None,
-        )
-        if invoked_by == "system":
-            agent._log(
-                "system_dismiss",
-                channel=channel,
                 existed=existed,
                 forced=bool(force),
                 reason=ack_reason or None,
             )
-        elif invoked_by == "soul":
-            agent._log("soul_dismiss")
-    except Exception:
-        pass
+            if invoked_by == "system":
+                agent._log(
+                    "system_dismiss",
+                    channel=channel,
+                    existed=existed,
+                    forced=bool(force),
+                    reason=ack_reason or None,
+                )
+            elif invoked_by == "soul":
+                agent._log("soul_dismiss")
+        except Exception:
+            pass
 
-    result = {
-        "status": "ok",
-        "channel": channel,
-        "cleared": existed,
-        "forced": bool(force),
-    }
-    if ack_reason:
-        result["reason"] = ack_reason
-    return result
+        result = {
+            "status": "ok",
+            "channel": channel,
+            "cleared": existed,
+            "forced": bool(force),
+        }
+        if ack_reason:
+            result["reason"] = ack_reason
+        return result
+
+    if channel == "system":
+        with agent._system_notification_lock:
+            return _clear_current_channel()
+
+    return _clear_current_channel()
 
 
 # ---------------------------------------------------------------------------

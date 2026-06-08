@@ -7,6 +7,7 @@ accepted for one release cycle so old chat-history tails do not crash.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from lingtai_kernel.intrinsics import system as sys_intrinsic
 from lingtai_kernel.notifications import (
     collect_notifications,
     is_generic_dismiss_guarded,
+    notification_fingerprint,
     publish,
 )
 
@@ -26,20 +28,39 @@ from lingtai_kernel.notifications import (
 class _StubAgent:
     _working_dir: Path
     _logs: list[tuple[str, dict]] = field(default_factory=list)
+    _notification_fp: tuple = ()
     _pending_notification_meta: str | None = "stale"
     _pending_notification_fp: tuple | None = (("soul.json", 1, 2),)
+    _system_notification_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _log(self, event_type: str, **fields: Any) -> None:
         self._logs.append((event_type, fields))
+
+
+class _RecordingLock:
+    def __init__(self) -> None:
+        self.entered = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
 
 
 def _events(agent: _StubAgent, name: str) -> list[dict]:
     return [fields for event, fields in agent._logs if event == name]
 
 
+def _mark_delivered(agent: _StubAgent) -> None:
+    agent._notification_fp = notification_fingerprint(agent._working_dir)
+
+
 def test_dismiss_channel_clears_existing_file(tmp_path: Path) -> None:
     agent = _StubAgent(tmp_path)
     publish(tmp_path, "soul", {"header": "soul flow"})
+    _mark_delivered(agent)
 
     res = sys_intrinsic._dismiss(agent, {"channel": "soul"})
 
@@ -66,6 +87,7 @@ def test_dismiss_channel_is_idempotent_when_absent(tmp_path: Path) -> None:
 def test_dismiss_mcp_dotted_channel(tmp_path: Path) -> None:
     agent = _StubAgent(tmp_path)
     publish(tmp_path, "mcp.telegram", {"header": "telegram event"})
+    _mark_delivered(agent)
 
     res = sys_intrinsic.handle(agent, {"action": "dismiss", "channel": "mcp.telegram"})
 
@@ -166,6 +188,7 @@ def test_soul_dismiss_alias_uses_shared_helper(tmp_path: Path) -> None:
 
     agent = _StubAgent(tmp_path)
     publish(tmp_path, "soul", {"header": "soul flow"})
+    _mark_delivered(agent)
 
     res = soul.handle(agent, {"action": "dismiss"})
 
@@ -180,6 +203,7 @@ def test_dismiss_one_channel_preserves_other_channels(tmp_path: Path) -> None:
     agent = _StubAgent(tmp_path)
     publish(tmp_path, "email", {"header": "1 unread"})
     publish(tmp_path, "soul", {"header": "soul flow"})
+    _mark_delivered(agent)
 
     res = sys_intrinsic._dismiss(agent, {"channel": "soul"})
 
@@ -203,6 +227,7 @@ def test_post_molt_dismiss_requires_ack_reason(tmp_path: Path) -> None:
 def test_post_molt_dismiss_records_ack_reason(tmp_path: Path) -> None:
     agent = _StubAgent(tmp_path)
     publish(tmp_path, "post-molt", {"header": "resume work"})
+    _mark_delivered(agent)
 
     res = sys_intrinsic._dismiss(agent, {
         "channel": "post-molt",
@@ -221,3 +246,99 @@ def test_post_molt_dismiss_records_ack_reason(tmp_path: Path) -> None:
         "continue: resumed the preserved task"
     assert _events(agent, "system_dismiss")[0]["reason"] == \
         "continue: resumed the preserved task"
+
+
+def test_stale_system_dismiss_refuses_and_preserves_newer_file(tmp_path: Path) -> None:
+    agent = _StubAgent(tmp_path)
+    publish(tmp_path, "system", {"header": "one", "data": {"events": ["old"]}})
+    _mark_delivered(agent)
+    delivered_fp = agent._notification_fp
+    publish(
+        tmp_path,
+        "system",
+        {"header": "two", "data": {"events": ["old", "new"], "extra": "changed"}},
+    )
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system"})
+
+    assert res["status"] == "error"
+    assert res["reason"] == "stale_channel_version"
+    assert res["channel"] == "system"
+    assert res["forced"] is False
+    assert res["delivered_version"] != res["current_version"]
+    assert collect_notifications(tmp_path)["system"]["header"] == "two"
+    assert agent._pending_notification_meta == "stale"
+    assert agent._pending_notification_fp == (("soul.json", 1, 2),)
+    assert agent._notification_fp == delivered_fp
+    refusal = _events(agent, "notification_dismiss_refused")[0]
+    assert refusal["reason"] == "stale_channel_version"
+    assert refusal["invoked_by"] == "system"
+
+
+def test_force_bypasses_stale_version_guard(tmp_path: Path) -> None:
+    agent = _StubAgent(tmp_path)
+    publish(tmp_path, "system", {"header": "one", "data": {"events": ["old"]}})
+    _mark_delivered(agent)
+    publish(
+        tmp_path,
+        "system",
+        {"header": "two", "data": {"events": ["old", "new"], "extra": "changed"}},
+    )
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system", "force": True})
+
+    assert res["status"] == "ok"
+    assert res["cleared"] is True
+    assert res["forced"] is True
+    assert "system" not in collect_notifications(tmp_path)
+    assert agent._pending_notification_meta is None
+    assert agent._pending_notification_fp is None
+
+
+def test_stale_other_channel_does_not_block_delivered_channel(tmp_path: Path) -> None:
+    agent = _StubAgent(tmp_path)
+    publish(tmp_path, "soul", {"header": "soul flow"})
+    publish(tmp_path, "system", {"header": "one", "data": {"events": ["old"]}})
+    _mark_delivered(agent)
+    publish(
+        tmp_path,
+        "system",
+        {"header": "two", "data": {"events": ["old", "new"], "extra": "changed"}},
+    )
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "soul"})
+
+    assert res["status"] == "ok"
+    assert res["cleared"] is True
+    out = collect_notifications(tmp_path)
+    assert set(out) == {"system"}
+    assert out["system"]["header"] == "two"
+
+
+def test_never_delivered_current_channel_refuses_without_force(tmp_path: Path) -> None:
+    agent = _StubAgent(tmp_path)
+    publish(tmp_path, "nudge", {"header": "new nudge"})
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "nudge"})
+
+    assert res["status"] == "error"
+    assert res["reason"] == "stale_channel_version"
+    assert res["delivered_version"] is None
+    assert res["current_version"][0] == "nudge.json"
+    assert "nudge" in collect_notifications(tmp_path)
+    assert agent._pending_notification_meta == "stale"
+    assert agent._pending_notification_fp == (("soul.json", 1, 2),)
+
+
+def test_system_compare_and_clear_uses_system_notification_lock(tmp_path: Path) -> None:
+    agent = _StubAgent(tmp_path)
+    lock = _RecordingLock()
+    agent._system_notification_lock = lock
+    publish(tmp_path, "system", {"header": "system event"})
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system"})
+
+    assert res["status"] == "ok"
+    assert lock.entered is True
+    assert "system" not in collect_notifications(tmp_path)

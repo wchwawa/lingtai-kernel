@@ -222,6 +222,7 @@ class _ProducerStubAgent:
     write to .notification/."""
     _working_dir: Path = None
     _logs: list[tuple[str, dict]] = field(default_factory=list)
+    _system_notification_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _log(self, evt: str, **fields: Any) -> None:
         self._logs.append((evt, fields))
