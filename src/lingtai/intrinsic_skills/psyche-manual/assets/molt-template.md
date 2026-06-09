@@ -43,11 +43,13 @@ Fill every section. Write `None` rather than omitting a section. This template i
 
 Before you call `psyche(object="context", action="molt", ...)`, verify:
 
-- The just-finished session segment is recorded as a session-journal sub-entry
-  (your molt history) under
+- The just-finished session segment is recorded as a session-journal child
+  (your molt history) — sub-knowledge under the routing parent
+  `knowledge/session-journal/KNOWLEDGE.md`, at
   `knowledge/session-journal/<YYYY-MM-DD>-molt-<molt-count>-<slug>/`, written
-  from `assets/session-journal-entry-template.md`, before the summary — and the
-  summary points at its path.
+  from `assets/session-journal-entry-template.md`, before the summary. It is NOT
+  a top-level knowledge entry. The parent index has a new one-line, relative-path
+  hook for it, and the summary points at the child's path.
 - Pad, lingtai/character, knowledge, skills, and session journal were updated where needed before writing the summary.
 - Every outstanding task has an action checklist entry.
 - Every action names who/where and what exact content or command is needed.
