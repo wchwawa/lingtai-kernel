@@ -44,19 +44,34 @@ All five happen *before* the molt call. They are not optional. Without them, the
 
 The four stores capture *who you are*, *what you're working on*, *verifiable truths*, and *reusable procedures*. None of them captures the *story* of a session. The session journal is that missing layer — it is also your **molt history**: each sub-entry is the record of one session segment that you write *before* you molt, so the chain of entries reconstructs how you got here across many molts.
 
-Write it as a parent/child knowledge structure under `knowledge/session-journal/`:
+Write it as a **routing parent with sub-knowledge children** under
+`knowledge/session-journal/` — the routing/index shape from the knowledge manual's
+"Nesting and sub-knowledge" section. Do **not** create each session as its own
+top-level knowledge entry; that floods the catalog. The parent is routing-only;
+the children carry the substance:
 
 ```
 knowledge/session-journal/
-├── KNOWLEDGE.md                                            # parent index
-├── 2026-05-13-molt-7-nudge-service/KNOWLEDGE.md            # one session
-├── 2026-05-13-molt-8-procedures-to-kernel/KNOWLEDGE.md     # another, same day
-└── 2026-05-14-molt-9-wechat-fixes/KNOWLEDGE.md             # ...
+├── KNOWLEDGE.md                                            # top-level routing/index ONLY
+├── 2026-05-13-molt-7-nudge-service/KNOWLEDGE.md            # sub-knowledge — one session
+├── 2026-05-13-molt-8-procedures-to-kernel/KNOWLEDGE.md     # sub-knowledge — same day
+└── 2026-05-14-molt-9-wechat-fixes/KNOWLEDGE.md             # sub-knowledge — ...
 ```
+
+Because `session-journal/` has its own `KNOWLEDGE.md`, the knowledge scanner
+treats it as a single entry and does **not** descend into the children — they are
+reachable only through the parent index. That is why the parent must list every
+child explicitly. See the knowledge manual's "Nesting and sub-knowledge" section
+(`.library/intrinsic/capabilities/knowledge/SKILL.md`) for the structural rule.
 
 The directory name is `<YYYY-MM-DD>-molt-<molt-count>-<slug>`. Read the molt count from your resident system prompt's identity section — "You have undergone N molts since birth." Use that N: the entry records the pre-molt segment, written *before* you call `psyche(context, molt)`. (The molt tool result afterward reports the next count, N+1; that belongs to the next segment, not this one.) Embedding the count keeps chronology stable when you molt more than once on the same date: the date alone cannot order two same-day entries, but the molt count always can.
 
-**The parent `knowledge/session-journal/KNOWLEDGE.md` is the index** — short, scannable, progressive-disclosure. One line per sub-entry: date, slug, one-sentence hook.
+**The parent `knowledge/session-journal/KNOWLEDGE.md` is routing-only** — short,
+scannable, progressive-disclosure. It is a table of contents, not a journal. One
+line per sub-entry: date, slug, one-sentence hook, and the child's *relative* path
+(`2026-05-13-molt-7-nudge-service/KNOWLEDGE.md`), never an absolute local path.
+Never let narrative leak into the parent — if a line grows past its hook, the
+detail belongs in the child.
 
 **The sub-entry `<YYYY-MM-DD>-molt-<molt-count>-<slug>/KNOWLEDGE.md` is the substance** — write it as the molt-history record of the segment, *before* you molt. Use `assets/session-journal-entry-template.md` from this skill directory for the frontmatter (including the `molt_count` field) and section layout. It is a journal, not a transcript — capture, in roughly this shape:
 
@@ -68,7 +83,7 @@ The directory name is `<YYYY-MM-DD>-molt-<molt-count>-<slug>`. Read the molt cou
 - **Collaborators** — who is involved, their channels, who is waiting on what
 - **Gotchas and lessons** — actionable warnings and failed approaches
 
-Several thousand tokens is fine when the segment was rich; keep it concise when it was small. The `<YYYY-MM-DD>-molt-<molt-count>-<slug>` prefix keeps chronology visible and stable in `ls` even across multiple molts on one day. The kernel `knowledge` mechanic auto-discovers subdirectories containing `KNOWLEDGE.md`. Write files via `write`/`edit` directly.
+Several thousand tokens is fine when the segment was rich; keep it concise when it was small. The `<YYYY-MM-DD>-molt-<molt-count>-<slug>` prefix keeps chronology visible and stable in `ls` even across multiple molts on one day. Each child is sub-knowledge under the routing parent — the scanner does not catalog it separately, so it is reachable only via the parent index; that is why you append the index line below. Write files via `write`/`edit` directly.
 
 Updating the parent index at each session is part of the practice — append one line referencing the new sub-entry. Then write the successor summary (§6), which points back at this entry's path.
 

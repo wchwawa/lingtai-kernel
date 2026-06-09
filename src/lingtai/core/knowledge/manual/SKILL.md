@@ -3,10 +3,10 @@ name: knowledge-manual
 description: >
   Concise guide to the `knowledge` capability: private agent-owned memory in
   `<agent>/knowledge/<name>/KNOWLEDGE.md`, progressive disclosure through the
-  prompt catalog, nested knowledge folders, and cross-references between
-  entries. Read this when you need to create, organize, or load private
-  knowledge, or when you need to explain how knowledge differs from portable
-  skills.
+  prompt catalog, nested knowledge folders, routing/index entries with
+  sub-knowledge children, and cross-references between entries. Read this when you
+  need to create, organize, or load private knowledge, lay out a routing parent
+  over related entries, or explain how knowledge differs from portable skills.
 version: 1.0.0
 ---
 
@@ -19,30 +19,24 @@ Skills are different: a skill is a reusable procedure meant to travel across age
 
 ## Names you will see
 
-The current private-memory capability is named `knowledge`, and the only tool it registers is:
+The private-memory capability is named `knowledge`, and the only tool it registers is:
 
 ```text
 knowledge({"action": "info"})
 ```
 
-Older documentation and UI surfaces may still say `library` or `codex`. Treat those as historical names for the private durable knowledge store unless the text is clearly talking about skills. In current agent code, `library(...)` and `codex(...)` are not registered compatibility aliases.
-
-Do not confuse this with the `.library/` directory: `.library/` is the on-disk home for **skills** (`SKILL.md` files), not for private `knowledge` entries. The naming is legacy but intentional for compatibility.
+Do not confuse `knowledge` with the `.library/` directory: `.library/` is the on-disk home for **skills** (`SKILL.md` files), not for private `knowledge` entries.
 
 Quick map:
 
-| Term / path | Current meaning |
+| Term / path | Meaning |
 |---|---|
 | `knowledge` tool / capability | Private per-agent durable memory catalog. |
 | `<agent>/knowledge/<name>/KNOWLEDGE.md` | One private knowledge entry. |
 | `.library/intrinsic`, `.library/custom`, `.library_shared` | Skill shelves containing `SKILL.md` files. |
 | `skills` tool / capability | Catalog of reusable portable procedures. |
-| `/skills` in the TUI | Browse the skill catalog for the selected agent. |
-| `/knowledge` in the TUI | Browse private durable knowledge/codex entries. |
-| `/library` or `/codex` in the TUI | Legacy aliases for `/knowledge`; keep only for compatibility. |
-| `recipe.json#library_name` | Legacy schema field naming a recipe-bundled skill library. It appends to `skills.paths`. |
 
-When writing new docs, prefer `knowledge` for private memory and `skills` for reusable procedures. Use `library` only when referring to a literal legacy path or schema field such as `.library/`, `.library_shared`, or `recipe.json#library_name`.
+Prefer `knowledge` for private memory and `skills` for reusable procedures.
 
 ## Layout
 
@@ -88,17 +82,39 @@ to rescan the catalog and refresh the prompt section, then use `read` on the lis
 
 This keeps the prompt small while still making the memory discoverable.
 
-## Nesting
+## Nesting and sub-knowledge
 
-Knowledge may be nested for organization. The scanner descends through folders until it finds `KNOWLEDGE.md` files, so these are valid:
+Knowledge and skills are **isomorphic in layout and progressive disclosure**:
+each top-level entry is a folder with a marker file (`KNOWLEDGE.md` here,
+`SKILL.md` there), the prompt carries only the catalog, and a top-level entry may
+act as a **routing/index parent** with nested children that hold the substance —
+exactly the nested-reference pattern documented in the skills manual.
+
+The only real difference is *audience*: knowledge is **private, local, and
+non-portable** by default (it may reference agent-local paths, mail IDs, and
+logs); skills are **reusable, shareable, and portable**.
+
+So for the routing/index parent pattern — when to use it, how the parent stays a
+short scannable index, how children carry the detail, relative child paths,
+keeping the catalog in sync — **read the skills manual's nested reference
+section** (`.library/intrinsic/capabilities/skills/SKILL.md`, "Nested
+skill/reference pattern for umbrella manuals") and apply the same shape with
+`KNOWLEDGE.md` in place of `SKILL.md`.
+
+Compact example of a routing parent with sub-knowledge children — a project's
+incident log:
 
 ```text
-knowledge/project-a/architecture/KNOWLEDGE.md
-knowledge/project-a/incidents/2026-05-cache-bug/KNOWLEDGE.md
-knowledge/people/reviewers/KNOWLEDGE.md
+knowledge/project-x-incidents/
+├── KNOWLEDGE.md                                   # routing/index ONLY
+├── 2026-05-13-cache-stampede/KNOWLEDGE.md         # child — the detail
+└── 2026-05-21-token-leak/KNOWLEDGE.md             # child
 ```
 
-Keep names filesystem-safe and descriptive. Use nesting to group related entries, not to hide information.
+The parent `KNOWLEDGE.md` is a short index: one line per child with a hook and the
+child's relative path; each child holds the full write-up. Keep names
+filesystem-safe and descriptive, point at children by relative path, and use
+nesting to group related entries, not to hide information.
 
 ## Cross-references
 
