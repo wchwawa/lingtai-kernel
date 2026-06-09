@@ -1,6 +1,7 @@
 """ToolExecutor — sequential and parallel tool call execution."""
 from __future__ import annotations
 
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -136,6 +137,80 @@ class ToolExecutor:
             deprecated_secondary_ignored=deprecated_secondary is not None,
         )
         return args
+
+
+    def _error_payload(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str | None,
+        tool_trace_id: str,
+        tool_args: dict,
+        error_phase: str,
+        error_type: str,
+        message: str,
+        elapsed_ms: int | float,
+        hint: str | None = None,
+        traceback_tail: str | None = None,
+        **extra: Any,
+    ) -> dict:
+        """Build a model-visible, self-repair-friendly tool error payload.
+
+        Durable lifecycle logs remain the forensic source of truth; this payload
+        gives the next model turn enough local context to understand what failed
+        without forcing it to query logs first.
+        """
+        payload = {
+            "status": "error",
+            "message": message,
+            "error_type": error_type,
+            "error_phase": error_phase,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "tool_trace_id": tool_trace_id,
+            "tool_args": tool_args,
+            "arg_keys": sorted(str(key) for key in tool_args.keys()),
+            "elapsed_ms": elapsed_ms,
+            "retryable": "unknown",
+            "_tool_error_payload_version": 1,
+        }
+        if hint:
+            payload["hint"] = hint
+        if traceback_tail:
+            payload["traceback_tail"] = traceback_tail
+        payload.update(extra)
+        return payload
+
+    def _enrich_error_payload(
+        self,
+        result: dict,
+        *,
+        tool_name: str,
+        tool_call_id: str | None,
+        tool_trace_id: str,
+        tool_args: dict,
+        error_phase: str,
+        error_type: str,
+        elapsed_ms: int | float,
+    ) -> dict:
+        """Add trace/argument context to a tool-returned error result in place."""
+        result.setdefault("error_type", error_type)
+        result.setdefault("error_phase", error_phase)
+        result.setdefault("tool_name", tool_name)
+        result.setdefault("tool_call_id", tool_call_id)
+        result.setdefault("tool_trace_id", tool_trace_id)
+        result.setdefault("tool_args", tool_args)
+        result.setdefault("arg_keys", sorted(str(key) for key in tool_args.keys()))
+        result.setdefault("elapsed_ms", elapsed_ms)
+        result.setdefault("retryable", "unknown")
+        result.setdefault("_tool_error_payload_version", 1)
+        return result
+
+    def _traceback_tail(self, exc: Exception, *, max_chars: int = 4000) -> str:
+        formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        if len(formatted) <= max_chars:
+            return formatted
+        return formatted[-max_chars:]
 
     def _build_result_message(
         self,
@@ -318,7 +393,18 @@ class ToolExecutor:
                     tool_trace_id=trace_id,
                     reason="unknown_tool",
                 )
-                err_result = {"status": "error", "message": str(UnknownToolError(tc.name))}
+                err_result = self._error_payload(
+                    tool_name=tc.name,
+                    tool_call_id=tc_id,
+                    tool_trace_id=trace_id,
+                    tool_args=args,
+                    error_phase="validation",
+                    error_type="UnknownToolError",
+                    message=str(UnknownToolError(tc.name)),
+                    elapsed_ms=timer.elapsed_ms,
+                    validation_reason="unknown_tool",
+                    available_tools=sorted(self._known_tools),
+                )
                 stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
                 self._log_tool_result(
                     tool_name=tc.name,
@@ -369,6 +455,17 @@ class ToolExecutor:
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
 
             status = result.get("status", "success") if isinstance(result, dict) else "success"
+            if status == "error" and isinstance(result, dict):
+                self._enrich_error_payload(
+                    result,
+                    tool_name=tc.name,
+                    tool_call_id=tc_id,
+                    tool_trace_id=trace_id,
+                    tool_args=args,
+                    error_phase="tool_returned_error",
+                    error_type=str(result.get("error_type") or result.get("tool") or "ToolReturnedError"),
+                    elapsed_ms=timer.elapsed_ms,
+                )
             self._log_lifecycle(
                 "tool_call_dispatch_done",
                 tool_name=tc.name,
@@ -424,7 +521,18 @@ class ToolExecutor:
                 exception=type(e).__name__,
                 exception_message=str(e),
             )
-            err_result = {"status": "error", "message": str(e)}
+            err_result = self._error_payload(
+                tool_name=tc.name,
+                tool_call_id=tc_id,
+                tool_trace_id=trace_id,
+                tool_args=args,
+                error_phase="dispatch",
+                error_type=type(e).__name__,
+                exception_type=type(e).__name__,
+                message=str(e),
+                elapsed_ms=timer.elapsed_ms,
+                traceback_tail=self._traceback_tail(e),
+            )
             stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
             self._log_tool_result(
                 tool_name=tc.name,
@@ -520,7 +628,18 @@ class ToolExecutor:
                     tool_trace_id=trace_id,
                     reason="unknown_tool",
                 )
-                result = {"status": "error", "message": str(UnknownToolError(tc.name))}
+                result = self._error_payload(
+                    tool_name=tc.name,
+                    tool_call_id=tc_id,
+                    tool_trace_id=trace_id,
+                    tool_args=args,
+                    error_phase="validation",
+                    error_type="UnknownToolError",
+                    message=str(UnknownToolError(tc.name)),
+                    elapsed_ms=0,
+                    validation_reason="unknown_tool",
+                    available_tools=sorted(self._known_tools),
+                )
                 stamp_meta(result, self._meta_fn(), 0)
                 self._log_tool_result(
                     tool_name=tc.name,
@@ -555,7 +674,7 @@ class ToolExecutor:
 
         # Phase 2: Execute in parallel
         results_map: dict[int, Any] = {}
-        errors_map: dict[int, str] = {}
+        errors_map: dict[int, dict] = {}
 
         def _run_one(index: int, tc: ToolCall, args: dict, trace_id: str):
             tc_id = getattr(tc, "id", None)
@@ -589,7 +708,18 @@ class ToolExecutor:
                     exception=type(e).__name__,
                     exception_message=str(e),
                 )
-                err_result = {"status": "error", "message": str(e)}
+                err_result = self._error_payload(
+                    tool_name=tc.name,
+                    tool_call_id=tc_id,
+                    tool_trace_id=trace_id,
+                    tool_args=args,
+                    error_phase="dispatch",
+                    error_type=type(e).__name__,
+                    exception_type=type(e).__name__,
+                    message=str(e),
+                    elapsed_ms=timer.elapsed_ms,
+                    traceback_tail=self._traceback_tail(e),
+                )
                 stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
                 self._log_tool_result(
                     tool_name=tc.name,
@@ -606,6 +736,17 @@ class ToolExecutor:
             if isinstance(result, dict):
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
             status = result.get("status", "success") if isinstance(result, dict) else "success"
+            if status == "error" and isinstance(result, dict):
+                self._enrich_error_payload(
+                    result,
+                    tool_name=tc.name,
+                    tool_call_id=tc_id,
+                    tool_trace_id=trace_id,
+                    tool_args=args,
+                    error_phase="tool_returned_error",
+                    error_type=str(result.get("error_type") or result.get("tool") or "ToolReturnedError"),
+                    elapsed_ms=timer.elapsed_ms,
+                )
             self._log_lifecycle(
                 "tool_call_dispatch_done",
                 tool_name=tc.name,
@@ -640,7 +781,6 @@ class ToolExecutor:
                     results_map[idx] = result
                 except Exception as e:
                     idx = futures[future]
-                    errors_map[idx] = str(e)
                     tc_entry = next(
                         (
                             (tc, args, trace_id)
@@ -653,6 +793,20 @@ class ToolExecutor:
                     tc_id = getattr(tc_entry[0], "id", None) if tc_entry else None
                     tc_args = tc_entry[1] if tc_entry else {}
                     trace_id = tc_entry[2] if tc_entry else f"tool-{uuid.uuid4().hex}"
+                    err_result = self._error_payload(
+                        tool_name=tc_name,
+                        tool_call_id=tc_id,
+                        tool_trace_id=trace_id,
+                        tool_args=tc_args,
+                        error_phase="parallel_future",
+                        error_type=type(e).__name__,
+                        exception_type=type(e).__name__,
+                        message=str(e),
+                        elapsed_ms=0,
+                        traceback_tail=self._traceback_tail(e),
+                    )
+                    stamp_meta(err_result, self._meta_fn(), 0)
+                    errors_map[idx] = err_result
                     self._log_lifecycle(
                         "tool_call_dispatch_failed",
                         tool_name=tc_name,
@@ -669,14 +823,13 @@ class ToolExecutor:
                         tool_args=tc_args,
                         status="error",
                         elapsed_ms=0,
-                        result={"status": "error", "message": str(e)},
+                        result=err_result,
                         exception=type(e).__name__,
                         exception_message=str(e),
                     )
         except TimeoutError:
             for future, idx in futures.items():
                 if idx not in results_map and idx not in errors_map:
-                    errors_map[idx] = "Timed out"
                     tc_entry = next(
                         (
                             (tc, args, trace_id)
@@ -689,6 +842,20 @@ class ToolExecutor:
                     tc_id_t = getattr(tc_entry[0], "id", None) if tc_entry else None
                     tc_args_t = tc_entry[1] if tc_entry else {}
                     trace_id_t = tc_entry[2] if tc_entry else f"tool-{uuid.uuid4().hex}"
+                    err_result = self._error_payload(
+                        tool_name=tc_name,
+                        tool_call_id=tc_id_t,
+                        tool_trace_id=trace_id_t,
+                        tool_args=tc_args_t,
+                        error_phase="timeout",
+                        error_type="TimeoutError",
+                        exception_type="TimeoutError",
+                        message="Timed out",
+                        elapsed_ms=0,
+                        retryable=True,
+                    )
+                    stamp_meta(err_result, self._meta_fn(), 0)
+                    errors_map[idx] = err_result
                     self._log_lifecycle(
                         "tool_call_dispatch_failed",
                         tool_name=tc_name,
@@ -705,7 +872,7 @@ class ToolExecutor:
                         tool_args=tc_args_t,
                         status="error",
                         elapsed_ms=0,
-                        result={"status": "error", "message": "Timed out"},
+                        result=err_result,
                     )
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -731,9 +898,8 @@ class ToolExecutor:
                         result.get("text", ""),
                     )
             elif i in errors_map:
-                err_msg = errors_map[i]
-                err_result = {"status": "error", "message": err_msg}
-                stamp_meta(err_result, self._meta_fn(), 0)
+                err_result = errors_map[i]
+                err_msg = str(err_result.get("message", "unknown error"))
                 tool_results.append((i, self._build_result_message(
                     tc.name, err_result, tool_call_id=tc_id, tool_trace_id=trace_id,
                     status="error",

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import lingtai_kernel.tool_executor as tool_executor_module
 from lingtai_kernel.llm.base import ToolCall
 from lingtai_kernel.llm.interface import ToolResultBlock
 from lingtai_kernel.loop_guard import LoopGuard
@@ -172,6 +173,18 @@ def test_lifecycle_trace_events_for_validation_failure():
 
     assert not intercepted
     assert len(results) == 1
+    error_result = results[0]["result"]
+    assert error_result["status"] == "error"
+    assert error_result["error_type"] == "UnknownToolError"
+    assert error_result["error_phase"] == "validation"
+    assert error_result["tool_name"] == "bogus"
+    assert error_result["tool_call_id"] == "bad-trace"
+    assert error_result["tool_trace_id"] == "bad-trace"
+    assert error_result["tool_args"] == {}
+    assert error_result["arg_keys"] == []
+    assert error_result["validation_reason"] == "unknown_tool"
+    assert error_result["available_tools"] == ["read"]
+    assert error_result["_tool_error_payload_version"] == 1
     assert any("bogus" in error for error in errors)
     events = _trace_events(logs, "bad-trace")
     assert "tool_call_approved" not in events
@@ -300,7 +313,18 @@ def test_lifecycle_trace_events_for_dispatch_exception():
     )
 
     assert not intercepted
-    assert results[0]["result"]["status"] == "error"
+    error_result = results[0]["result"]
+    assert error_result["status"] == "error"
+    assert error_result["message"] == "boom"
+    assert error_result["error_type"] == "RuntimeError"
+    assert error_result["exception_type"] == "RuntimeError"
+    assert error_result["error_phase"] == "dispatch"
+    assert error_result["tool_name"] == "explode"
+    assert error_result["tool_call_id"] == "err-trace"
+    assert error_result["tool_trace_id"] == "err-trace"
+    assert error_result["tool_args"] == {}
+    assert "RuntimeError: boom" in error_result["traceback_tail"]
+    assert error_result["_tool_error_payload_version"] == 1
     assert any("boom" in error for error in errors)
     events = _trace_events(logs, "err-trace")
     assert "tool_call_dispatch_failed" in events
@@ -350,6 +374,65 @@ def test_execute_parallel():
     assert elapsed < 0.15
 
 
+def test_parallel_future_exception_stays_enriched_for_model(monkeypatch):
+    class FakeFuture:
+        def result(self):
+            raise RuntimeError("worker wrapper failed")
+
+    class FakePool:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+            self.futures = []
+
+        def submit(self, *_args, **_kwargs):
+            future = FakeFuture()
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(tool_executor_module, "ThreadPoolExecutor", FakePool)
+    monkeypatch.setattr(tool_executor_module, "as_completed", lambda futures, timeout: list(futures))
+
+    logs = []
+    executor = make_executor(
+        dispatch_fn=lambda tc: {"status": "ok"},
+        parallel_safe={"a", "b"},
+        known_tools={"a", "b"},
+        logger_fn=lambda event_type, **fields: logs.append((event_type, fields)),
+    )
+    errors = []
+
+    results, intercepted, text = executor.execute(
+        [
+            ToolCall(name="a", args={"x": 1}, id="trace-a"),
+            ToolCall(name="b", args={"y": 2}, id="trace-b"),
+        ],
+        collected_errors=errors,
+    )
+
+    assert not intercepted
+    assert text == ""
+    assert len(results) == 2
+    payload = results[0]["result"]
+    assert payload["status"] == "error"
+    assert payload["message"] == "worker wrapper failed"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["exception_type"] == "RuntimeError"
+    assert payload["error_phase"] == "parallel_future"
+    assert payload["tool_name"] == "a"
+    assert payload["tool_call_id"] == "trace-a"
+    assert payload["tool_trace_id"] == "trace-a"
+    assert payload["tool_args"] == {"x": 1}
+    assert payload["arg_keys"] == ["x"]
+    assert "RuntimeError: worker wrapper failed" in payload["traceback_tail"]
+    assert payload["_tool_error_payload_version"] == 1
+    assert any("worker wrapper failed" in error for error in errors)
+    log_payload = logs[_log_index(logs, "tool_result", trace_id="trace-a")][1]["result"]
+    assert log_payload == payload
+
+
 def test_intercept_hook():
     executor = make_executor()
     hook = MagicMock(return_value="intercepted!")
@@ -369,6 +452,33 @@ def test_error_collected():
     assert len(results) == 1
     assert "bad" in errors[0]
     assert "something broke" in errors[0]
+
+
+def test_tool_returned_error_is_enriched_for_agent_repair():
+    def dispatch(tc):
+        return {"status": "error", "message": "chat_id must be integer", "tool": "telegram"}
+
+    executor = make_executor(dispatch_fn=dispatch)
+    calls = [ToolCall(name="telegram", args={"action": "send", "chat_id": "", "text": ""}, id="tg-err")]
+    errors = []
+
+    results, intercepted, text = executor.execute(calls, collected_errors=errors)
+
+    assert not intercepted
+    assert text == ""
+    payload = results[0]["result"]
+    assert payload["status"] == "error"
+    assert payload["message"] == "chat_id must be integer"
+    assert payload["error_type"] == "telegram"
+    assert payload["error_phase"] == "tool_returned_error"
+    assert payload["tool_name"] == "telegram"
+    assert payload["tool_call_id"] == "tg-err"
+    assert payload["tool_trace_id"] == "tg-err"
+    assert payload["tool_args"] == {"action": "send", "chat_id": "", "text": ""}
+    assert payload["arg_keys"] == ["action", "chat_id", "text"]
+    assert payload["retryable"] == "unknown"
+    assert payload["_tool_error_payload_version"] == 1
+    assert any("chat_id must be integer" in error for error in errors)
 
 
 def test_cancel_event_stops_sequential():
