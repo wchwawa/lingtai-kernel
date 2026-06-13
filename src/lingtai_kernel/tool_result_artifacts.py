@@ -47,15 +47,15 @@ ARTIFACT_MARKER = "lingtai_tool_result_spill"
 # Top-level reserved fields that ``ToolExecutor`` attaches to dict-shaped
 # primary results before they reach the wire.  When the primary result
 # itself is oversized and gets spilled, replacing the whole dict with the
-# manifest would silently drop the loop-guard duplicate warning.  The
-# warning is small by construction.
+# manifest would silently drop provider-visible advisory metadata.  The
+# advisory payload is small by construction.
 #
 # Deliberately tight allowlist.  Arbitrary business-level top-level keys
 # (e.g. a tool returning ``{"data": [...]}``) are NOT hoisted — that's
 # what the artifact file is for.  ``_meta`` is also intentionally
 # omitted: it's stamped by ``stamp_meta`` and a copy lives in the
 # artifact; agents that want timing/context can read the sidecar.
-_HOISTED_RESERVED_FIELDS = ("_duplicate_warning",)
+_HOISTED_RESERVED_FIELDS = ("_advisory",)
 
 # Preventive cap — applied by ToolExecutor on every freshly built tool
 # result, before it reaches the LLM wire.
@@ -142,11 +142,11 @@ def spill_oversized_result(
     code path produced the spill (``"preventive"`` or ``"retroactive"``).
 
     When the original is a dict, reserved provider-visible fields listed in
-    ``_HOISTED_RESERVED_FIELDS`` (currently ``_duplicate_warning``) are
+    ``_HOISTED_RESERVED_FIELDS`` (currently ``_advisory``) are
     copied verbatim from the original onto the manifest so they survive the
     wire replacement.  The artifact file always holds the complete
     post-dispatch original, including those fields, so nothing is lost — the
-    hoist only makes loop-guard warnings visible on the wire-bound copy.
+    hoist only makes advisory metadata visible on the wire-bound copy.
 
     When ``working_dir`` is None or the write fails, returns the manifest
     with ``spill_path`` / ``spill_path_abs`` set to None and a

@@ -1158,7 +1158,15 @@ def _check_external_send(agent, tool_calls, tool_results=None) -> None:
                                     # dict + str raises TypeError. Attach as a
                                     # structured field instead — adapters render
                                     # the whole dict to the LLM as JSON.
-                                    tr.content["_duplicate_warning"] = warning
+                                    tr.content["_advisory"] = {
+                                        "type": "duplicate_send",
+                                        "severity": "warning",
+                                        "allowed": False,
+                                        "blocked": True,
+                                        "advisory_only": False,
+                                        "message": warning,
+                                        "skill_refs": ["system-manual"],
+                                    }
                                 else:
                                     tr.content = (
                                         (tr.content or "")

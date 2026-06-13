@@ -68,7 +68,7 @@ Because the only progress signal is `last_output_at`, the right cadence on CLI b
 
 ### Anti-patterns
 
-- **Poll-for-completion loops.** Wrong because completion is pushed. A `while state == "running": sleep` pattern is working against the system — do other work or yield; the notification will tell you when there's something to inspect.
+- **Poll-for-completion loops.** Wrong because completion is pushed. A `while state == "running": sleep` pattern is working against the system — do other work or yield; the notification will tell you when there's something to inspect. If `_advisory.type == "duplicate_tool_call"` appears on repeated `daemon(list/check)`, the result was still executed and not blocked; do not answer it by immediately making the same call again. Choose one owner (usually the parent) to coordinate daemon status, then wait for notification or set one future reminder.
 - **`check` immediately after `emanate`.** The first 30 seconds are almost always model warmup + initial tool calls; nothing actionable. Save the call.
 - **Reclaiming on a hunch.** See the stall heuristic. Default to "let it cook."
 - **`check` with `last=1000, truncate=0`.** Dumps the full event log into your context. Use targeted `last=20` and only widen if needed.

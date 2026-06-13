@@ -25,17 +25,19 @@ class DupVerdict:
 
     Attributes:
         count: Total times this (name, args) has been seen (including this call).
-        blocked: If True, the caller should skip execution entirely.
-        warning: Warning text to inject into the result dict, or None.
+        blocked: Reserved for compatibility; duplicate-call detection is advisory-only.
+        warning: Advisory text to inject into the result dict, or None.
+        severity: Advisory severity, or None when no advisory should be shown.
     """
     count: int
     blocked: bool
     warning: str | None
+    severity: str | None = None
 
 
-# Keys stripped from tool args before computing the dedup key.
+# Keys stripped from tool args before computing the dedup/advisory key.
 # These carry metadata, not semantic intent.
-_STRIP_KEYS = frozenset({"commentary", "_sync"})
+_STRIP_KEYS = frozenset({"commentary", "_sync", "_reasoning"})
 
 
 class LoopGuard:
@@ -57,14 +59,11 @@ class LoopGuard:
 
             for tc in tool_calls:
                 verdict = guard.record_tool_call(tc.name, tc.args)
-                if verdict.blocked:
-                    # skip execution, return blocked result
-                    ...
-                else:
-                    # execute tool
-                    ...
-                    if verdict.warning:
-                        result["_duplicate_warning"] = verdict.warning
+                # Duplicate calls are advisory-only: execute the tool, but attach
+                # escalating guidance so the model can reconsider necessity.
+                ...
+                if verdict.warning:
+                    result["_advisory"] = guard.advisory_metadata(verdict)
 
             # ... send results back ...
             guard.clear_progress_notice()
@@ -73,7 +72,7 @@ class LoopGuard:
     def __init__(
         self,
         max_total_calls: int = ACTIVE_TURN_TOOL_CALL_EMERGENCY_LIMIT,
-        dup_free_passes: int = 2,
+        dup_free_passes: int = 3,
         dup_hard_block: int = 8,
         invalid_tool_limit: int = 2,
         notice_interval: int | None = None,
@@ -192,7 +191,7 @@ class LoopGuard:
     def _dedup_key(name: str, args: dict | None) -> tuple[str, str]:
         """Create a hashable key for duplicate detection.
 
-        Strips metadata keys (commentary, _sync) before serializing,
+        Strips metadata keys (commentary, _sync, _reasoning) before serializing,
         so that semantically identical calls with different metadata
         are treated as duplicates.
         """
@@ -207,11 +206,13 @@ class LoopGuard:
         return (name, args_str)
 
     def record_tool_call(self, name: str, args: dict | None) -> DupVerdict:
-        """Record a tool call and return a verdict on whether to execute it.
+        """Record a tool call and return duplicate-call guidance.
 
-        Call this *before* executing each tool. The verdict tells the caller:
-          - Whether to skip execution (verdict.blocked)
-          - Whether to inject a warning into the result (verdict.warning)
+        Duplicate detection is intentionally advisory-only: repeated calls still
+        execute, but the tool result can surface a warning so the model can
+        reconsider necessity, wait for completion notifications, increase cadence,
+        or switch strategy. By default the first three identical semantic calls
+        are free; the fourth and later receive guidance.
         """
         key = self._dedup_key(name, args)
         count = self._dup_counts.get(key, 0) + 1
@@ -220,43 +221,68 @@ class LoopGuard:
         if count <= self._dup_free_passes:
             return DupVerdict(count=count, blocked=False, warning=None)
 
-        if count >= self._dup_hard_block:
-            return DupVerdict(
-                count=count,
-                blocked=True,
-                warning=self._warning_for_count(name, count),
-            )
-
+        severity = self._severity_for_count(count)
         return DupVerdict(
             count=count,
             blocked=False,
-            warning=self._warning_for_count(name, count),
+            warning=self._warning_for_count(name, count, severity),
+            severity=severity,
         )
 
-    def _warning_for_count(self, name: str, count: int) -> str:
-        """Generate an escalating warning message for duplicate calls."""
-        if count < self._dup_free_passes + 3:
-            # Mild warning (passes N+1 to N+2)
+    def _severity_for_count(self, count: int) -> str:
+        """Return advisory severity for a duplicate semantic call count."""
+        if count <= 4:
+            return "caution"
+        if count < 10:
+            return "warning"
+        return "strong_warning"
+
+    def _warning_for_count(self, name: str, count: int, severity: str) -> str:
+        """Generate an escalating advisory message for duplicate calls."""
+        if severity == "caution":
             return (
-                f"You have called '{name}' with identical arguments {count} times. "
-                f"Consider whether this is necessary — repeated identical calls "
-                f"waste tokens and rarely produce new information."
+                f"Repeated tool-call advisory: '{name}' has been called {count} times "
+                f"with identical semantic arguments. Execution was NOT blocked; "
+                f"the tool still ran. If this was intentional, continue. Otherwise, "
+                f"consult the referenced skill for repeated-call and polling best "
+                f"practices before calling again."
             )
-        if count < self._dup_hard_block:
-            # Strong warning (passes N+3+)
+        if severity == "warning":
             return (
-                f"STOP POLLING: '{name}' called {count} times with identical arguments. "
-                f"This is a polling loop that wastes tokens. Do NOT call this tool again "
-                f"with the same arguments. If you are waiting for a result, it will be "
-                f"delivered to you automatically — do not poll for it."
+                f"Repeated tool-call warning: '{name}' has been called {count} times "
+                f"with identical semantic arguments. Execution was NOT blocked, but "
+                f"this pattern may be a polling/control-loop that wastes tokens or "
+                f"API calls. Consult the referenced skill for repeated-call and "
+                f"polling best practices before calling again."
             )
-        # At or past hard block
         return (
-            f"BLOCKED: '{name}' has been called {count} times with identical arguments "
-            f"(hard limit: {self._dup_hard_block}). Execution was SKIPPED. "
-            f"This call was a polling loop. Do NOT repeat it. "
-            f"Proceed with a different approach or respond to the user."
+            f"Strong repeated tool-call advisory: '{name}' has been called {count} "
+            f"times with identical semantic arguments. Execution was NOT blocked, "
+            f"but this is likely a wasteful loop. Consult the referenced skill for "
+            f"repeated-call and polling best practices before calling again."
         )
+
+    def advisory_metadata(self, verdict: DupVerdict) -> dict | None:
+        """Return provider-visible advisory metadata for a duplicate verdict."""
+        if not verdict.warning:
+            return None
+        return {
+            "type": "duplicate_tool_call",
+            "severity": verdict.severity or "caution",
+            "semantic_duplicate": True,
+            "repeat_count": verdict.count,
+            "ignored_fields": sorted(_STRIP_KEYS),
+            "allowed": True,
+            "blocked": False,
+            "advisory_only": True,
+            "message": verdict.warning,
+            "skill_refs": [
+                "system-manual",
+                "bash-manual",
+                "daemon-manual",
+                "email-manual",
+            ],
+        }
 
     @property
     def dup_counts(self) -> dict[tuple[str, str], int]:

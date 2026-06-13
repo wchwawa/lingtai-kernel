@@ -9,23 +9,53 @@ def test_loop_guard_no_loop():
         assert not verdict.blocked
 
 
-def test_loop_guard_detects_identical():
-    """Identical calls at or beyond dup_hard_block should be blocked."""
-    guard = LoopGuard(max_total_calls=20, dup_hard_block=3)
-    guard.record_tool_call("read", {"path": "/foo"})
-    guard.record_tool_call("read", {"path": "/foo"})
-    verdict = guard.record_tool_call("read", {"path": "/foo"})  # 3rd = hard block
-    assert verdict.blocked
-    assert verdict.count == 3
+def test_loop_guard_repeated_identical_calls_are_advisory_only():
+    """Identical calls receive guidance but are not blocked by the kernel."""
+    guard = LoopGuard(max_total_calls=20)
+    for _ in range(3):
+        verdict = guard.record_tool_call("read", {"path": "/foo"})
+        assert not verdict.blocked
+        assert verdict.warning is None
+
+    verdict = guard.record_tool_call("read", {"path": "/foo"})
+    assert not verdict.blocked
+    assert verdict.warning is not None
+    assert "NOT blocked" in verdict.warning
+    assert verdict.count == 4
+    advisory = guard.advisory_metadata(verdict)
+    assert advisory is not None
+    assert advisory["type"] == "duplicate_tool_call"
+    assert advisory["allowed"] is True
+    assert advisory["blocked"] is False
+    assert advisory["advisory_only"] is True
+    assert advisory["repeat_count"] == 4
+    assert "system-manual" in advisory["skill_refs"]
 
 
-def test_loop_guard_warning_before_block():
-    """Calls between free passes and hard block should get a warning but not be blocked."""
+def test_loop_guard_custom_free_passes_start_advisory_without_blocking():
+    """Custom free-pass count controls when advisory metadata starts."""
     guard = LoopGuard(max_total_calls=20, dup_free_passes=1, dup_hard_block=5)
     guard.record_tool_call("read", {"path": "/foo"})  # count=1 (free pass)
     verdict = guard.record_tool_call("read", {"path": "/foo"})  # count=2 (warn)
     assert not verdict.blocked
     assert verdict.warning is not None
+    assert guard.advisory_metadata(verdict)["severity"] == "caution"
+
+
+def test_loop_guard_ignores_reasoning_metadata_for_duplicate_detection():
+    """Different reasoning text must not let polling/list loops bypass dedup."""
+    guard = LoopGuard(max_total_calls=20, dup_free_passes=1, dup_hard_block=3)
+    guard.record_tool_call("bash", {"action": "poll", "job_id": "job-1", "_reasoning": "first"})
+    second = guard.record_tool_call("bash", {"action": "poll", "job_id": "job-1", "_reasoning": "again"})
+    third = guard.record_tool_call("bash", {"action": "poll", "job_id": "job-1", "_reasoning": "still waiting"})
+    assert second.count == 2
+    assert second.warning is not None
+    assert not third.blocked
+    assert third.warning is not None
+    assert third.count == 3
+    advisory = guard.advisory_metadata(third)
+    assert advisory is not None
+    assert "_reasoning" in advisory["ignored_fields"]
 
 
 def test_loop_guard_check_limit():

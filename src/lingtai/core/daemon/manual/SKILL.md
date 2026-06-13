@@ -80,6 +80,9 @@ files, not standalone top-level skills.
   after completion or reclaim until cleanup.
 - `daemon(action="list")` is a status overview, not a full transcript.
 - Completion is push-notified; do not poll only to ask "is it done yet".
+- If repeated-call `_advisory` appears on `daemon(list/check)`, the call still
+  ran; treat it as a signal to stop the loop, centralize status checking in the
+  parent, and read `reference/inspection/SKILL.md` before polling again.
 - If an emanation might be stuck, inspect state changes, recent transcript, and
   event activity before reclaiming.
 - CLI backend flags are passthroughs. Verify the current CLI's `--help` before

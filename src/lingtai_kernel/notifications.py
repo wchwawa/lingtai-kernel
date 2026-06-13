@@ -20,6 +20,7 @@ for the implementation specification.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -128,24 +129,30 @@ def is_generic_dismiss_guarded(channel: str) -> str | None:
 
 
 def notification_fingerprint(workdir: Path) -> tuple:
-    """Compute a fingerprint of allowlisted `.notification/*.json`.
+    """Compute a content fingerprint of allowlisted `.notification/*.json`.
 
-    Returns a tuple of ``(name, mtime_ns, size)`` triples sorted by name.
-    Empty tuple if the directory is absent or empty.  Used to detect
-    whether any producer file has changed since the last poll.
+    Returns a tuple of ``(name, size, sha256)`` triples sorted by name.  Empty
+    tuple if the directory is absent or empty.  Used to detect whether the
+    producer-visible notification payload changed since the last poll.
 
-    ``mtime_ns`` (nanosecond resolution) is used rather than ``mtime``
-    so that rapid producer writes within a one-second window aren't
-    mistaken for "no change" on filesystems with second-level mtime.
+    The fingerprint is intentionally content-based rather than mtime-based:
+    some chat/MCP producers rewrite equivalent JSON on every poll, which used
+    to create fresh mtimes and drive one notification injection per heartbeat
+    even when the model-visible notification was unchanged.
     """
     notif_dir = workdir / ".notification"
     if not notif_dir.is_dir():
         return ()
-    return tuple(sorted(
-        (f.name, f.stat().st_mtime_ns, f.stat().st_size)
-        for f in notif_dir.iterdir()
-        if f.is_file() and f.suffix == ".json" and is_channel_allowed(f.stem)
-    ))
+    entries = []
+    for f in notif_dir.iterdir():
+        if not (f.is_file() and f.suffix == ".json" and is_channel_allowed(f.stem)):
+            continue
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        entries.append((f.name, len(data), hashlib.sha256(data).hexdigest()))
+    return tuple(sorted(entries))
 
 
 def collect_notifications(workdir: Path) -> dict:

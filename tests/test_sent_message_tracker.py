@@ -271,9 +271,10 @@ class TestCheckExternalSend:
 
         _check_external_send(agent, [tc2], tool_results)
         assert isinstance(tr.content, dict)
-        assert tr.content.get("_duplicate_warning", "").startswith(
-            "Recently sent similar message"
-        )
+        advisory = tr.content.get("_advisory", {})
+        assert advisory.get("type") == "duplicate_send"
+        assert advisory.get("message", "").startswith("Recently sent similar message")
+        assert advisory.get("blocked") is True
         # Original fields preserved
         assert tr.content["status"] == "sent"
         assert tr.content["message_id"] == "tg:1:42"

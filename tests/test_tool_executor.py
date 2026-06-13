@@ -223,7 +223,7 @@ def test_lifecycle_trace_events_for_validation_failure():
     )
 
 
-def test_lifecycle_trace_events_for_duplicate_block():
+def test_lifecycle_trace_events_for_duplicate_advisory_only():
     logs = []
     dispatch_calls = []
 
@@ -234,26 +234,31 @@ def test_lifecycle_trace_events_for_duplicate_block():
     executor = make_executor(
         dispatch_fn=dispatch,
         logger_fn=lambda event_type, **fields: logs.append((event_type, fields)),
-        guard=LoopGuard(max_total_calls=50, dup_free_passes=0, dup_hard_block=3),
+        guard=LoopGuard(max_total_calls=50, dup_free_passes=2, dup_hard_block=3),
     )
 
     first, intercepted, _ = executor.execute([ToolCall(name="poll", args={}, id="dup-1")])
     second, intercepted, _ = executor.execute([ToolCall(name="poll", args={}, id="dup-2")])
-    blocked, intercepted, _ = executor.execute([ToolCall(name="poll", args={}, id="dup-3")])
+    advised, intercepted, _ = executor.execute([ToolCall(name="poll", args={}, id="dup-3")])
 
     assert not intercepted
-    assert len(first) == len(second) == len(blocked) == 1
-    assert dispatch_calls == ["dup-1", "dup-2"]
+    assert len(first) == len(second) == len(advised) == 1
+    assert dispatch_calls == ["dup-1", "dup-2", "dup-3"]
     events = _trace_events(logs, "dup-3")
-    assert "tool_call_approved" not in events
-    assert "tool_call_dispatch_start" not in events
-    validation_event = logs[
-        _log_index(logs, "tool_call_validation_failed", trace_id="dup-3")
-    ][1]
-    assert validation_event["reason"] == "duplicate_call"
-    assert validation_event["duplicate_count"] == 3
-    assert blocked[0]["result"]["status"] == "blocked"
-    assert _log_index(logs, "tool_call_validation_failed", trace_id="dup-3") < _log_index(
+    assert "tool_call_validation_failed" not in events
+    assert "tool_call_approved" in events
+    assert "tool_call_dispatch_start" in events
+    assert "tool_call_dispatch_done" in events
+    payload = advised[0]["result"]
+    assert payload["status"] == "ok"
+    advisory = payload["_advisory"]
+    assert advisory["type"] == "duplicate_tool_call"
+    assert advisory["repeat_count"] == 3
+    assert advisory["allowed"] is True
+    assert advisory["blocked"] is False
+    assert advisory["advisory_only"] is True
+    assert "NOT blocked" in advisory["message"]
+    assert _log_index(logs, "tool_call_dispatch_done", trace_id="dup-3") < _log_index(
         logs, "tool_result_durable_log_visible", trace_id="dup-3"
     )
     assert _log_index(logs, "tool_result_durable_log_visible", trace_id="dup-3") < _log_index(

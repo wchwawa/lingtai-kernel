@@ -36,6 +36,7 @@ from ..meta_block import build_meta, build_notification_payload
 from ..session import SessionManager
 from ..tc_inbox import TCInbox
 from ..token_ledger import append_token_entry
+from ..trace_redaction import redact_for_trajectory
 
 logger = get_logger()
 
@@ -1629,7 +1630,8 @@ class BaseAgent:
         try:
             state = self.get_chat_state()
             if state and state.get("messages"):
-                lines = [json.dumps(entry, ensure_ascii=False) for entry in state["messages"]]
+                redacted_messages = redact_for_trajectory(state["messages"])
+                lines = [json.dumps(entry, ensure_ascii=False) for entry in redacted_messages]
                 (history_dir / "chat_history.jsonl").write_text("\n".join(lines) + "\n")
         except Exception as e:
             logger.warning(f"[{self.agent_name}] Failed to save chat history: {e}")
