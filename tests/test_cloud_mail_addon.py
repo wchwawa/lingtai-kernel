@@ -60,6 +60,15 @@ def make_router(rows=None, *, captured=None):
                 return httpx.Response(200, json={"code": 401, "message": "missing public token"})
             return _ok(list(rows))
 
+        if path == "/public/addUser":
+            captured["addUser_auth"] = auth
+            captured["addUser_body"] = body
+            if auth != PUBLIC_TOKEN:
+                return httpx.Response(200, json={"code": 401, "message": "missing public token"})
+            if not isinstance(body.get("list"), list):
+                return httpx.Response(200, json={"code": 400, "message": "missing user list"})
+            return _ok(None)
+
         if path == "/login":
             captured["login_body"] = body
             if body.get("email") == "user@example.com" and body.get("password") == "userpw":
@@ -413,6 +422,22 @@ def test_allowed_senders_filter_case_insensitive(tmp_path):
     assert mgr.poll_once(acct) == 1
     assert len(events) == 1
     mgr.stop()
+
+
+def test_add_user_uses_cloud_mail_batch_contract(tmp_path):
+    mgr, captured = make_manager(tmp_path)
+    out = mgr.handle({
+        "action": "add_user",
+        "email": "new@example.com",
+        "password": "secretpw",
+        "role_name": "member",
+    })
+    assert out["status"] == "ok"
+    assert out["added"] == "new@example.com"
+    assert captured["addUser_auth"] == PUBLIC_TOKEN
+    assert captured["addUser_body"] == {
+        "list": [{"email": "new@example.com", "password": "secretpw", "roleName": "member"}]
+    }
 
 
 # ---------------------------------------------------------------------------

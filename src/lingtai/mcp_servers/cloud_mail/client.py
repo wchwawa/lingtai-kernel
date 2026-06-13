@@ -216,10 +216,16 @@ class CloudMailClient:
         return rows
 
     def add_user(self, email: str, password: str, **extra: Any) -> Any:
-        """POST /public/addUser. Optional convenience; never logs the password."""
-        body = {"email": email, "password": password}
-        body.update({k: v for k, v in extra.items() if v is not None})
-        return self._public_request("POST", "/public/addUser", json=body)
+        """POST /public/addUser. Optional convenience; never logs the password.
+
+        Cloud Mail's public ``addUser`` endpoint expects a batch-shaped body:
+        ``{"list": [{"email": ..., "password": ..., ...}]}``, even for a
+        single user. Keep the public MCP surface simple while matching that
+        upstream contract exactly.
+        """
+        row = {"email": email, "password": password}
+        row.update({k: v for k, v in extra.items() if v is not None})
+        return self._public_request("POST", "/public/addUser", json={"list": [row]})
 
     # -- user API --
 

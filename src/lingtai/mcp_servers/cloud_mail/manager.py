@@ -73,6 +73,7 @@ SCHEMA: dict[str, Any] = {
         # add_user (optional)
         "email": {"type": "string", "description": "add_user: new user email."},
         "password": {"type": "string", "description": "add_user: new user password."},
+        "role_name": {"type": "string", "description": "add_user: optional Cloud Mail role name."},
     },
     "required": ["action"],
 }
@@ -327,7 +328,9 @@ class CloudMailManager:
         password = args.get("password")
         if not email or not password:
             return {"status": "error", "error": "add_user requires 'email' and 'password'"}
-        data = acct.client.add_user(email, password)
+        role_name = args.get("role_name") or args.get("roleName")
+        extra = {"roleName": role_name} if role_name else {}
+        data = acct.client.add_user(email, password, **extra)
         # Never echo the password back.
         return {"status": "ok", "account": acct.alias, "added": email, "result": data}
 
