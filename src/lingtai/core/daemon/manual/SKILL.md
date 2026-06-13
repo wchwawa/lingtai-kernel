@@ -6,7 +6,7 @@ description: >
   hunch, understand `daemon(action="list")`, use CLI backends and `backend_options`,
   and clean up daemon footprint. Read this after dispatching daemon work that is
   slow, failed, timed out, or needs backend-specific reasoning.
-version: 0.4.0
+version: 0.5.0
 ---
 
 # Daemon Manual — Router
@@ -80,6 +80,13 @@ files, not standalone top-level skills.
   after completion or reclaim until cleanup.
 - `daemon(action="list")` is a status overview, not a full transcript.
 - Completion is push-notified; do not poll only to ask "is it done yet".
+- **Idle care before resting: completion is push-notified, but do not rest on
+  that alone.** With daemon work pending and unverified-healthy, arm at least
+  one self-wake (a `.notification/cron.json` reminder) before going IDLE, with
+  the delay set from the task's expected duration. On wake, health-check — daemon
+  `state`/`last_output_at` advancing, `current_tool`/`tool_call_count` changing,
+  events alive — and if there is no progress, reclaim/downgrade/switch path and
+  report rather than waiting indefinitely. See `reference/inspection/SKILL.md`.
 - If repeated-call `_advisory` appears on `daemon(list/check)`, the call still
   ran; treat it as a signal to stop the loop, centralize status checking in the
   parent, and read `reference/inspection/SKILL.md` before polling again.
