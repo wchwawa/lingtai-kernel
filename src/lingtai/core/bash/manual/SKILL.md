@@ -10,7 +10,7 @@ description: >
   reminders, debugging silent jobs, and safe cleanup. Start here for any
   long-running agent CLI, time-driven recurring work ("every hour", "weekdays at
   9", "remind me later"), or when a scheduled job misbehaves.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Bash Manual — Router
@@ -107,6 +107,21 @@ files, not standalone top-level skills.
   reminder or internal delayed self-email) and yield/idle. Poll again only when
   a completion notification arrives, the reminder fires, or you have a concrete
   reason to expect new state.
+
+- **Idle care: never hand a launched async job entirely to its completion
+  notification.** Once you start a long-running agent/coding CLI with
+  `bash(async=true)` (or any child sub-process), do not go fully IDLE relying
+  only on the completion/IDLE signal. Before resting, arm **at least one**
+  self-wake (a `.notification/cron.json` reminder or an internal delayed
+  self-email). Pick the delay from the task's *expected* duration — not a fixed
+  number; a 30 s scan and a 40 min build warrant different windows. When the
+  wake fires, health-check rather than assume progress: confirm the log is
+  **growing**, the PID/child is **alive**, the output file/worktree shows
+  **progress**, and the job is not stuck on an interactive prompt or a
+  provider/model error. If there is no progress, do not keep waiting — cancel,
+  downgrade, or switch path, and report to the human. A job that exits
+  immediately or sits silent past its expected window is the failure mode this
+  rule exists to catch.
 
 - LingTai has no built-in recurring scheduler. Host schedulers wake agents by
   producing channel input, usually a mailbox-drop or notification file.

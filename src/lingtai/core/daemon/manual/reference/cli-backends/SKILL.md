@@ -5,7 +5,7 @@ description: >
   daemon(action=list), claude/claude-p/codex/opencode behavior,
   backend_options flag passing, preset/capability inheritance, and Codex modal
   capabilities.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Daemon CLI Backend Reference
@@ -141,6 +141,16 @@ spec refuses the whole batch with a clear `ValueError`):
 dashes in the emitted flag, so JSON-friendly `{"approval_policy":"never"}`
 becomes `--approval-policy never`. Unsafe keys are rejected before any subprocess
 call.
+
+**Do not set a CLI backend's `max_turns` too low.** A turn budget that fits a
+quick scripted task will kill a Claude Code / Codex backend mid-exploration — the
+agent is still reading files and orienting when the watchdog terminates it,
+surfacing as **exit code 143** (SIGTERM) with little or no useful output. The
+exploration-then-act shape of these agents means early turns are spent on reads
+and greps, not the deliverable; budget for that. If you must cap turns, size the
+cap to the *full* task (explore + act + verify), not to a single edit, and prefer
+leaving `max_turns` unset over guessing low. Treat a 143 exit with a short
+transcript as "I starved it," not "the model failed."
 
 **Claude reserved flags:** Claude daemon backends own their execution mode.
 `backend_options` cannot override harness-owned flags such as `--settings`,

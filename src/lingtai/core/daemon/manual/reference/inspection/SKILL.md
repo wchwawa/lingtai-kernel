@@ -4,7 +4,7 @@ description: >
   Nested daemon-manual reference for polling cadence, stall heuristics, anti-
   patterns, backend-specific polling notes, and setting reminders before resting
   while daemon work remains pending.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Daemon Inspection Reference
@@ -77,6 +77,18 @@ Because the only progress signal is `last_output_at`, the right cadence on CLI b
 ### Resting while daemon work is pending: set a cron notification reminder
 
 If the daemon is healthy but unfinished and you are about to rest, do **not** keep polling and do **not** rely on memory. Set a lightweight wakeup reminder through the `bash-manual` section **"One-shot wakeup reminders via `.notification/cron.json`"**.
+
+**This is mandatory idle care, not an optimization.** Completion is push-notified, but a daemon can also die silently, stall, exit immediately, or get stuck on a provider/model error *without* producing a terminal-state notification — and a CLI-backend emanation gives you no live `tokens`/`turn` signal to fall back on. So before going IDLE with daemon work pending and **unverified-healthy**, arm at least one self-wake. Choose the delay from the task's *expected* duration, not a fixed value: a focused scan might warrant a 2-minute check; a long multi-file synthesis, 10–15 minutes.
+
+When the reminder fires, **health-check before trusting it kept working**:
+
+- `state` is still `running` (not silently `failed`/`timeout`);
+- `last_output_at` (CLI backends) or `chat_history.jsonl` (lingtai) advanced since you slept;
+- `current_tool` / `tool_call_count` changed, or events show fresh activity;
+- the output file / worktree shows real progress;
+- it is not blocked on an interactive prompt or a repeated provider/model error.
+
+If there is **no** progress, do not re-arm and wait again — apply the stall heuristic and `reclaim`, downgrade the backend/scope, switch path, and **report to the human**. Indefinite waiting on a dead daemon is the failure this rule exists to prevent.
 
 Use this when:
 

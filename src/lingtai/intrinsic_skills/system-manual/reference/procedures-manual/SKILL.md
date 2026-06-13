@@ -11,7 +11,7 @@ description: >
   maintenance. This is a nested skill-reference under `system-manual`, not a
   standalone catalog skill; its folder may carry scripts/assets as procedure
   guidance grows.
-version: 1.0.0
+version: 1.1.0
 tags: [lingtai, system-manual, procedures, progressive-disclosure, responsiveness, deliverables, issue-reporting]
 ---
 
@@ -114,6 +114,19 @@ Before authoring skills, read `skills-manual`. Before authoring knowledge, read
 When there is nothing concrete to do, go idle/asleep. Do not use timed sleeps as
 a default wait loop. If waiting for a human or peer, ensure the current state is
 in pad/knowledge and then sleep or stop the turn.
+
+**Idle care for unverified long-running work.** Before entering idle, if you have
+launched any async/long-running child — a backgrounded `bash(async=true)` agent
+CLI, a daemon emanation, a scheduled job, a PR/CI run — whose health you have not
+just verified, do **not** hand yourself entirely to its completion/IDLE
+notification. Arm at least one self-wake (a `.notification/cron.json` reminder or
+an internal delayed self-email) sized to the task's *expected* duration, not a
+fixed interval. On wake, health-check before assuming progress: log growing,
+PID/child/daemon events alive, output file/worktree advancing, not stuck on an
+interactive prompt or a provider/model error. If there is no progress, act —
+cancel/downgrade/switch path and report to the human — rather than waiting
+indefinitely. Mechanics live in `bash-manual` (async + reminders) and
+`daemon-manual` → `reference/inspection/SKILL.md` (daemon health checks).
 
 Use `reference/substrate-manual/SKILL.md` for lifecycle semantics. Use forceful karma
 actions only after diagnosis and only when you are responsible for that peer's
