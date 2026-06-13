@@ -135,10 +135,12 @@ def notification_fingerprint(workdir: Path) -> tuple:
     tuple if the directory is absent or empty.  Used to detect whether the
     producer-visible notification payload changed since the last poll.
 
-    The fingerprint is intentionally content-based rather than mtime-based:
-    some chat/MCP producers rewrite equivalent JSON on every poll, which used
-    to create fresh mtimes and drive one notification injection per heartbeat
-    even when the model-visible notification was unchanged.
+    The fingerprint is intentionally byte-content-based rather than mtime-based:
+    some chat/MCP producers rewrite byte-identical notification JSON on every poll,
+    which used to create fresh mtimes and drive one notification injection per
+    heartbeat even when the model-visible notification was unchanged. Semantically
+    equivalent JSON with different whitespace or key order is still considered
+    changed.
     """
     notif_dir = workdir / ".notification"
     if not notif_dir.is_dir():

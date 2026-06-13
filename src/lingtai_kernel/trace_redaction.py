@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 
