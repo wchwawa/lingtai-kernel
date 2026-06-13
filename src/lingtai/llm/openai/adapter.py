@@ -980,6 +980,7 @@ class OpenAIResponsesSession(ChatSession):
         previous_response_id: str | None = None,
         compact_threshold: int | None = None,
         interface: ChatInterface | None = None,
+        prompt_cache_key: str | None = None,
     ):
         self._client = client
         self._model = model
@@ -990,6 +991,12 @@ class OpenAIResponsesSession(ChatSession):
         self._response_id: str | None = previous_response_id
         self._compact_threshold = _validate_compact_threshold(compact_threshold)
         self._interface = interface or ChatInterface()
+        # Optional OpenAI Responses ``prompt_cache_key`` — opts the request
+        # into cross-request prompt caching keyed by a stable string. Sent
+        # only when set; ``None`` leaves it off (default OpenAI behavior).
+        # Note: ``prompt_cache_retention`` is deliberately never sent — the
+        # Codex backend rejects it (``Unsupported parameter``).
+        self._prompt_cache_key = prompt_cache_key
 
     @property
     def interface(self) -> ChatInterface:
@@ -1063,6 +1070,8 @@ class OpenAIResponsesSession(ChatSession):
             kwargs["context_management"] = [
                 {"type": "compaction", "compact_threshold": self._compact_threshold}
             ]
+        if self._prompt_cache_key:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
 
         raw = self._client.responses.create(**kwargs)
         self._response_id = raw.id
@@ -1094,6 +1103,8 @@ class OpenAIResponsesSession(ChatSession):
             kwargs["context_management"] = [
                 {"type": "compaction", "compact_threshold": self._compact_threshold}
             ]
+        if self._prompt_cache_key:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
 
         acc = StreamingAccumulator()
         response_id = None
@@ -1509,6 +1520,11 @@ class CodexResponsesSession(OpenAIResponsesSession):
                 kwargs["context_management"] = [
                     {"type": "compaction", "compact_threshold": self._compact_threshold}
                 ]
+            # Opt into Codex prompt caching with a stable key. We send only
+            # `prompt_cache_key`; the Codex backend rejects `prompt_cache_retention`
+            # (Unsupported parameter), so it is deliberately never sent.
+            if self._prompt_cache_key:
+                kwargs["prompt_cache_key"] = self._prompt_cache_key
 
             acc = StreamingAccumulator()
             response_id = None
@@ -1663,4 +1679,10 @@ class CodexOpenAIAdapter(OpenAIAdapter):
             previous_response_id=None,
             compact_threshold=None,
             interface=interface,
+            # Stable, conservative default so successive Codex turns hit the
+            # backend prompt cache. Keyed by model so distinct models don't
+            # share a cache namespace; `:v1` lets us bump it if the stable
+            # prefix ever changes shape. Never paired with
+            # `prompt_cache_retention` (Codex rejects that parameter).
+            prompt_cache_key=f"lingtai-codex:{model}:v1",
         )

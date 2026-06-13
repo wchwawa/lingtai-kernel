@@ -73,8 +73,12 @@ Both paths return sessions wrapped via `_wrap_with_gate()` for rate limiting.
 
 1. Record message into canonical `ChatInterface`
 2. `to_responses_input(interface)` — replay full conversation as input items
-3. Force `stream=True`, `store=False`; omit `previous_response_id`
+3. Force `stream=True`, `store=False`; omit `previous_response_id`; send stable `prompt_cache_key`
 4. After success: record assistant response into interface for next replay
+
+### Prompt cache key (`prompt_cache_key`)
+
+`OpenAIResponsesSession.__init__` accepts an optional `prompt_cache_key`; when set it is added to the Responses `create()` kwargs on all three send paths (`OpenAIResponsesSession.send` / `send_stream`, `CodexResponsesSession.send_stream`). Default is `None` (off) for the standard OpenAI Responses path. `CodexOpenAIAdapter._create_responses_session` defaults it to the stable `lingtai-codex:{model}:v1` so successive Codex turns hit the backend prompt cache. `prompt_cache_retention` is deliberately never sent — Codex rejects it (`Unsupported parameter`) — and no Anthropic-style `cache_control` is emitted (Codex rejects `Unknown parameter`).
 
 ## State
 
