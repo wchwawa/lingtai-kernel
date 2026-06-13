@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..trace_redaction import redact_for_trajectory
 from ..workdir import WorkingDir
 
 
@@ -494,7 +495,8 @@ class CompositeLoggingService(LoggingService):
         self.sqlite_index = sqlite_index
 
     def log(self, event: dict) -> dict | None:
-        metadata = self.primary.log(event)
+        redacted_event = redact_for_trajectory(event)
+        metadata = self.primary.log(redacted_event)
         # If the primary JSONL write did not happen (for example after close),
         # do not create sidecar-only facts.  JSONL must remain the source of truth.
         if metadata is None:
@@ -502,7 +504,9 @@ class CompositeLoggingService(LoggingService):
         if self.sqlite_index is not None:
             source_file = metadata.get("source_file")
             source_offset = metadata.get("source_offset")
-            self.sqlite_index.log_event(event, source_file=source_file, source_offset=source_offset)
+            self.sqlite_index.log_event(
+                redacted_event, source_file=source_file, source_offset=source_offset
+            )
         return metadata
 
     def get_events(self) -> list[dict]:

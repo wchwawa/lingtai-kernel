@@ -224,6 +224,20 @@ class ToolExecutor:
             result.update(self._guard.progress_metadata())
         return result
 
+    def _attach_duplicate_advisory(self, result: Any, verdict: Any) -> Any:
+        """Attach duplicate-call advisory metadata to dict results.
+
+        LoopGuard duplicate detection is advisory-only: the call has already run
+        (or at least reached its normal validation/dispatch path). Keep the
+        provider-visible shape centralized so success, returned-error, and
+        dispatch-error results all expose the same ``_advisory`` payload.
+        """
+        if isinstance(result, dict) and getattr(verdict, "warning", None):
+            advisory = self._guard.advisory_metadata(verdict)
+            if advisory:
+                result["_advisory"] = advisory
+        return result
+
     def _build_result_message(
         self,
         tool_name: str,
@@ -396,35 +410,6 @@ class ToolExecutor:
         args = self._prepare_args(tc, trace_id)
 
         verdict = self._guard.record_tool_call(tc.name, args)
-        if verdict.blocked:
-            self._log_lifecycle(
-                "tool_call_validation_failed",
-                tool_name=tc.name,
-                tool_call_id=tc_id,
-                tool_trace_id=trace_id,
-                reason="duplicate_call",
-                duplicate_count=verdict.count,
-            )
-            result = {
-                "status": "blocked",
-                "_duplicate_warning": verdict.warning,
-                "message": f"Execution skipped — duplicate call #{verdict.count}",
-            }
-            self._log_tool_result(
-                tool_name=tc.name,
-                tool_call_id=tc_id,
-                tool_trace_id=trace_id,
-                tool_args=args,
-                status="blocked",
-                elapsed_ms=0,
-                result=result,
-                duplicate_count=verdict.count,
-            )
-            msg = self._build_result_message(
-                tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                status="blocked",
-            )
-            return msg, False, ""
 
         timer = ToolTimer()
         try:
@@ -498,6 +483,7 @@ class ToolExecutor:
 
             if isinstance(result, dict):
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
+                self._attach_duplicate_advisory(result, verdict)
 
             status = result.get("status", "success") if isinstance(result, dict) else "success"
             if status == "error" and isinstance(result, dict):
@@ -528,9 +514,6 @@ class ToolExecutor:
                 elapsed_ms=timer.elapsed_ms,
                 result=result,
             )
-
-            if verdict.warning and isinstance(result, dict):
-                result["_duplicate_warning"] = verdict.warning
 
             if isinstance(result, dict) and result.get("intercept"):
                 intercept_text = result.get("text", "")
@@ -579,6 +562,7 @@ class ToolExecutor:
                 traceback_tail=self._traceback_tail(e),
             )
             stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
+            self._attach_duplicate_advisory(err_result, verdict)
             self._log_tool_result(
                 tool_name=tc.name,
                 tool_call_id=tc_id,
@@ -627,7 +611,7 @@ class ToolExecutor:
         cancel_event: Any | None = None,
     ) -> tuple[list, bool, str]:
         # Phase 1: Pre-check duplicates (sequential — guard not thread-safe)
-        to_execute: list[tuple[int, ToolCall, dict, str]] = []
+        to_execute: list[tuple[int, ToolCall, dict, str, Any]] = []
         tool_results: list[tuple[int, Any]] = []
 
         for i, tc in enumerate(tool_calls):
@@ -636,35 +620,7 @@ class ToolExecutor:
             args = self._prepare_args(tc, trace_id)
 
             verdict = self._guard.record_tool_call(tc.name, args)
-            if verdict.blocked:
-                self._log_lifecycle(
-                    "tool_call_validation_failed",
-                    tool_name=tc.name,
-                    tool_call_id=tc_id,
-                    tool_trace_id=trace_id,
-                    reason="duplicate_call",
-                    duplicate_count=verdict.count,
-                )
-                result = {
-                    "status": "blocked",
-                    "_duplicate_warning": verdict.warning,
-                    "message": f"Execution skipped — duplicate call #{verdict.count}",
-                }
-                self._log_tool_result(
-                    tool_name=tc.name,
-                    tool_call_id=tc_id,
-                    tool_trace_id=trace_id,
-                    tool_args=args,
-                    status="blocked",
-                    elapsed_ms=0,
-                    result=result,
-                    duplicate_count=verdict.count,
-                )
-                tool_results.append((i, self._build_result_message(
-                    tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status="blocked",
-                )))
-            elif self._known_tools and tc.name not in self._known_tools:
+            if self._known_tools and tc.name not in self._known_tools:
                 self._guard.record_invalid_tool(tc.name)
                 self._log_lifecycle(
                     "tool_call_validation_failed",
@@ -711,7 +667,7 @@ class ToolExecutor:
                     approval_mode="pass_through",
                     policy="default_allow",
                 )
-                to_execute.append((i, tc, args, trace_id))
+                to_execute.append((i, tc, args, trace_id, verdict))
 
         if not to_execute:
             tool_results.sort(key=lambda x: x[0])
@@ -721,7 +677,7 @@ class ToolExecutor:
         results_map: dict[int, Any] = {}
         errors_map: dict[int, dict] = {}
 
-        def _run_one(index: int, tc: ToolCall, args: dict, trace_id: str):
+        def _run_one(index: int, tc: ToolCall, args: dict, trace_id: str, verdict):
             tc_id = getattr(tc, "id", None)
             self._log(
                 "tool_call",
@@ -766,6 +722,7 @@ class ToolExecutor:
                     traceback_tail=self._traceback_tail(e),
                 )
                 stamp_meta(err_result, self._meta_fn(), timer.elapsed_ms)
+                self._attach_duplicate_advisory(err_result, verdict)
                 self._log_tool_result(
                     tool_name=tc.name,
                     tool_call_id=tc_id,
@@ -780,6 +737,7 @@ class ToolExecutor:
                 return index, err_result
             if isinstance(result, dict):
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
+                self._attach_duplicate_advisory(result, verdict)
             status = result.get("status", "success") if isinstance(result, dict) else "success"
             if status == "error" and isinstance(result, dict):
                 self._enrich_error_payload(
@@ -814,8 +772,8 @@ class ToolExecutor:
         pool = ThreadPoolExecutor(max_workers=len(to_execute))
         try:
             futures = {
-                pool.submit(_run_one, i, tc, args, trace_id): i
-                for i, tc, args, trace_id in to_execute
+                pool.submit(_run_one, i, tc, args, trace_id, verdict): i
+                for i, tc, args, trace_id, verdict in to_execute
             }
             for future in as_completed(futures, timeout=300.0):
                 if cancel_event is not None and cancel_event.is_set():
@@ -828,8 +786,8 @@ class ToolExecutor:
                     idx = futures[future]
                     tc_entry = next(
                         (
-                            (tc, args, trace_id)
-                            for i, tc, args, trace_id in to_execute
+                            (tc, args, trace_id, _verdict)
+                            for i, tc, args, trace_id, _verdict in to_execute
                             if i == idx
                         ),
                         None,
@@ -838,6 +796,7 @@ class ToolExecutor:
                     tc_id = getattr(tc_entry[0], "id", None) if tc_entry else None
                     tc_args = tc_entry[1] if tc_entry else {}
                     trace_id = tc_entry[2] if tc_entry else f"tool-{uuid.uuid4().hex}"
+                    verdict = tc_entry[3] if tc_entry else None
                     err_result = self._error_payload(
                         tool_name=tc_name,
                         tool_call_id=tc_id,
@@ -851,6 +810,7 @@ class ToolExecutor:
                         traceback_tail=self._traceback_tail(e),
                     )
                     stamp_meta(err_result, self._meta_fn(), 0)
+                    self._attach_duplicate_advisory(err_result, verdict)
                     errors_map[idx] = err_result
                     self._log_lifecycle(
                         "tool_call_dispatch_failed",
@@ -877,8 +837,8 @@ class ToolExecutor:
                 if idx not in results_map and idx not in errors_map:
                     tc_entry = next(
                         (
-                            (tc, args, trace_id)
-                            for i, tc, args, trace_id in to_execute
+                            (tc, args, trace_id, _verdict)
+                            for i, tc, args, trace_id, _verdict in to_execute
                             if i == idx
                         ),
                         None,
@@ -887,6 +847,7 @@ class ToolExecutor:
                     tc_id_t = getattr(tc_entry[0], "id", None) if tc_entry else None
                     tc_args_t = tc_entry[1] if tc_entry else {}
                     trace_id_t = tc_entry[2] if tc_entry else f"tool-{uuid.uuid4().hex}"
+                    verdict_t = tc_entry[3] if tc_entry else None
                     err_result = self._error_payload(
                         tool_name=tc_name,
                         tool_call_id=tc_id_t,
@@ -900,6 +861,7 @@ class ToolExecutor:
                         retryable=True,
                     )
                     stamp_meta(err_result, self._meta_fn(), 0)
+                    self._attach_duplicate_advisory(err_result, verdict_t)
                     errors_map[idx] = err_result
                     self._log_lifecycle(
                         "tool_call_dispatch_failed",
@@ -923,7 +885,7 @@ class ToolExecutor:
             pool.shutdown(wait=False, cancel_futures=True)
 
         # Phase 3: Build result messages (sequential)
-        for i, tc, args, trace_id in to_execute:
+        for i, tc, args, trace_id, verdict in to_execute:
             tc_id = getattr(tc, "id", None)
             if i in results_map:
                 result = results_map[i]

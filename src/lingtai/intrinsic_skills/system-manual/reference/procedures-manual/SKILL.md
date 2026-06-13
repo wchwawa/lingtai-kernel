@@ -86,6 +86,15 @@ research, or spawn/contact an avatar when the capability should persist. For the
 runtime model, read `reference/substrate-manual/SKILL.md`; for a specific tool, read
 that tool's manual.
 
+Tool results may carry `_advisory.type == "duplicate_tool_call"` when the same
+semantic tool call repeats more than the free-pass threshold. This is
+advisory-only: the tool already ran and the kernel did not block it. Treat it as
+a pause point. If the repeat is intentional, continue; otherwise switch to the
+relevant manual (`bash-manual`, `daemon-manual`, `email-manual`) and use the
+recommended pattern: wait for completion notifications, back off, set one future
+reminder, centralize polling, or yield/idle rather than immediately repeating the
+same call.
+
 ## 4. Write skills and knowledge as you work
 
 After non-trivial work, deposit the grain:

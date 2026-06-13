@@ -53,22 +53,27 @@ def test_fingerprint_with_files(tmp_path: Path) -> None:
     assert names == sorted(names)
     assert "email.json" in names
     assert "soul.json" in names
-    # Each entry is (name, mtime_ns, size).
-    for name, mtime_ns, size in fp:
-        assert isinstance(mtime_ns, int)
+    # Each entry is (name, size, sha256).
+    for name, size, digest in fp:
         assert size > 0
+        assert isinstance(digest, str)
+        assert len(digest) == 64
 
 
 def test_fingerprint_changes_on_overwrite(tmp_path: Path) -> None:
     publish(tmp_path, "email", {"count": 1})
     fp1 = notification_fingerprint(tmp_path)
-    # Force mtime_ns to differ — tmp+rename always bumps mtime; tiny
-    # delay only needed if the underlying filesystem coalesces ns.
-    import time as _time
-    _time.sleep(0.001)
     publish(tmp_path, "email", {"count": 2, "extra": "more bytes"})
     fp2 = notification_fingerprint(tmp_path)
     assert fp1 != fp2
+
+
+def test_fingerprint_ignores_equivalent_rewrite_mtime_churn(tmp_path: Path) -> None:
+    publish(tmp_path, "email", {"count": 1})
+    fp1 = notification_fingerprint(tmp_path)
+    publish(tmp_path, "email", {"count": 1})
+    fp2 = notification_fingerprint(tmp_path)
+    assert fp1 == fp2
 
 
 def test_collect_empty_dir(tmp_path: Path) -> None:

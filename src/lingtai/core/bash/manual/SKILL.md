@@ -100,6 +100,14 @@ files, not standalone top-level skills.
   bash(action="cancel", job_id="ab12…")
   ```
 
+- **If repeated-call `_advisory` appears on `bash(action="poll")`, stop
+  tight polling.** The poll already executed; the advisory is not a block. If
+  the job is still running and nothing meaningful changed, handle any human
+  messages, do other work, or set one future reminder (`bash` notification
+  reminder or internal delayed self-email) and yield/idle. Poll again only when
+  a completion notification arrives, the reminder fires, or you have a concrete
+  reason to expect new state.
+
 - LingTai has no built-in recurring scheduler. Host schedulers wake agents by
   producing channel input, usually a mailbox-drop or notification file.
 - Prefer event watchers/webhooks when an external event is the real trigger;

@@ -444,14 +444,14 @@ def test_executor_logs_spill_event(tmp_path):
 # -- Reserved-field hoisting onto spill manifest ---------------------------
 
 
-def test_spill_manifest_hoists_duplicate_warning_from_oversized_dict(tmp_path):
-    """``_duplicate_warning`` from LoopGuard is provider-visible and short.
+def test_spill_manifest_hoists_advisory_from_oversized_dict(tmp_path):
+    """``_advisory`` from LoopGuard is provider-visible and short.
     Hoist it onto the manifest so the agent still sees the loop-guard
     nudge even when the primary result spilled."""
     result = {
         "status": "ok",
         "blob": "Y" * (CAP * 3),
-        "_duplicate_warning": "warning: duplicate call #3 — consider varying your args",
+        "_advisory": {"type": "duplicate_tool_call", "message": "warning"},
     }
     out = _spill_oversized_result(
         result,
@@ -461,7 +461,7 @@ def test_spill_manifest_hoists_duplicate_warning_from_oversized_dict(tmp_path):
         working_dir=tmp_path,
     )
     assert out["status"] == "spilled"
-    assert out.get("_duplicate_warning") == result["_duplicate_warning"]
+    assert out.get("_advisory") == result["_advisory"]
     assert _serialized_len(out) <= CAP
 
 
@@ -479,7 +479,7 @@ def test_spill_manifest_does_not_hoist_arbitrary_business_or_removed_secondary_k
         "rows_processed": 12345,
         "warnings": ["row 17 skipped"],
         "_secondary": {"status": "legacy", "tool": "email", "action": "read"},
-        "_duplicate_warning": "warn: dup #2",
+        "_advisory": {"type": "duplicate_tool_call", "message": "warn"},
     }
     out = _spill_oversized_result(
         result, max_chars=CAP, tool_name="bash", tool_call_id="tc-tight",
@@ -488,7 +488,7 @@ def test_spill_manifest_does_not_hoist_arbitrary_business_or_removed_secondary_k
     assert "rows_processed" not in out
     assert "warnings" not in out
     assert "_secondary" not in out
-    assert out["_duplicate_warning"] == result["_duplicate_warning"]
+    assert out["_advisory"] == result["_advisory"]
 
     artifact = tmp_path / out["spill_path"]
     on_disk = json.loads(artifact.read_text(encoding="utf-8"))
@@ -505,18 +505,18 @@ def test_spill_manifest_no_hoist_when_original_is_non_dict(tmp_path):
     )
     assert out["status"] == "spilled"
     assert "_secondary" not in out
-    assert "_duplicate_warning" not in out
+    assert "_advisory" not in out
 
 
-def test_spill_manifest_duplicate_warning_survives_through_executor_call_site(tmp_path):
+def test_spill_manifest_advisory_survives_through_executor_call_site(tmp_path):
     """End-to-end: current reserved fields survive executor spill."""
-    duplicate_warning = "warning: duplicate call #3 — consider varying your args"
+    advisory = {"type": "duplicate_tool_call", "message": "warning"}
 
     def dispatch(tc):
         return {
             "status": "ok",
             "blob": "X" * (CAP * 3),
-            "_duplicate_warning": duplicate_warning,
+            "_advisory": advisory,
         }
 
     captured = MagicMock(side_effect=lambda name, result, **kw: result)
@@ -531,6 +531,6 @@ def test_spill_manifest_duplicate_warning_survives_through_executor_call_site(tm
     name, wire_payload = captured.call_args.args
     assert name == "bash"
     assert wire_payload["status"] == "spilled"
-    assert wire_payload["_duplicate_warning"] == duplicate_warning
+    assert wire_payload["_advisory"] == advisory
     assert "_secondary" not in wire_payload
     assert _serialized_len(wire_payload) <= CAP
