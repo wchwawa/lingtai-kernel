@@ -82,14 +82,21 @@ also embedded at the top of the task prompt and persisted in the daemon `.prompt
 file for forensics.
 
 **LingTai backend tool surface.** The built-in `lingtai` backend uses preset
-resolution plus daemon tool curation. MCP tools still auto-inherit from the
-parent. The daemon-eligible `email` intrinsic is available by default so an
-emanation can communicate in the local agent network when the task requires it;
-other intrinsics remain unavailable to keep daemon lightweight and non-recursive.
-As with file/bash/web/MCP tools, technical availability is not a policy by
-itself: the parent should use `system_prompt` to say when and how the daemon may
-use any available tool, including who it may contact and what context it may
-share if email is involved.
+resolution plus daemon tool curation. Parent MCP tools are not auto-inherited:
+provide full one-run MCP registrations per task with `mcp: [{name, transport,
+...}]`. The runtime serializes those registrations into the oneshot prompt as
+YAML for every backend. For the built-in LingTai backend, it also starts the
+registered MCP clients for this run and exposes their tools in the daemon tool
+surface; clients are closed when the run finishes. CLI backends do not receive
+native config injection in this PR, but they do receive the same YAML context and
+may load it if their runtime supports MCP. Secret `env`/`headers` values are
+redacted in prompts. The daemon-eligible `email` intrinsic is available by
+default so an emanation can communicate in the local agent network when the task
+requires it; other intrinsics remain unavailable to keep daemon lightweight and
+non-recursive. As with file/bash/web/MCP tools, technical availability is not a
+policy by itself: the parent should use `system_prompt` to say when and how the
+daemon may use any available tool, including who it may contact and what context
+it may share if email is involved.
 
 **When to use CLI backends:** Use them when the task benefits from a different
 agent runtime's tool surface (for example Claude Code's built-in file editing or

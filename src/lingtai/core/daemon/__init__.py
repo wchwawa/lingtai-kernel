@@ -390,6 +390,11 @@ def get_schema(lang: str = "en") -> dict:
                             "items": {"type": "string"},
                             "description": t(lang, "daemon.tasks.skills"),
                         },
+                        "mcp": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": t(lang, "daemon.tasks.mcp"),
+                        },
                         "preset": {
                             "type": "string",
                             "description": t(lang, "daemon.tasks.preset"),
@@ -686,6 +691,161 @@ class DaemonManager:
                 lines.append(f"      {dl}" if dl else "      ")
         return "\n".join(lines)
 
+    @staticmethod
+    def _task_mcp_registrations(spec: dict) -> tuple[list[dict], str | None]:
+        """Return normalized full MCP registrations and rendered YAML context."""
+        raw = spec.get("mcp")
+        if raw is None:
+            return [], None
+        if not isinstance(raw, list):
+            raise ValueError("mcp must be an array of MCP registration objects")
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"mcp[{idx}] must be an MCP registration object")
+            cfg = dict(item)
+            name = cfg.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"mcp[{idx}].name must be a non-empty string")
+            name = name.strip()
+            if name in seen:
+                raise ValueError(f"duplicate MCP registration name: {name}")
+            seen.add(name)
+            transport = cfg.get("transport", cfg.get("type", "stdio"))
+            if transport not in ("stdio", "http"):
+                raise ValueError(
+                    f"mcp[{idx}].transport/type must be 'stdio' or 'http'"
+                )
+            normalized = dict(cfg)
+            normalized["name"] = name
+            normalized["transport"] = transport
+            normalized.pop("type", None)
+            if transport == "stdio":
+                if not isinstance(normalized.get("command"), str) or not normalized["command"]:
+                    raise ValueError(f"mcp[{idx}] stdio registration requires command")
+                args = normalized.get("args", [])
+                if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                    raise ValueError(f"mcp[{idx}].args must be an array of strings")
+                normalized["args"] = list(args)
+                env = normalized.get("env")
+                if env is not None and (
+                    not isinstance(env, dict)
+                    or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+                ):
+                    raise ValueError(f"mcp[{idx}].env must be an object of string values")
+            else:
+                if not isinstance(normalized.get("url"), str) or not normalized["url"]:
+                    raise ValueError(f"mcp[{idx}] http registration requires url")
+                headers = normalized.get("headers")
+                if headers is not None and (
+                    not isinstance(headers, dict)
+                    or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items())
+                ):
+                    raise ValueError(f"mcp[{idx}].headers must be an object of string values")
+            rows.append(normalized)
+        return rows, DaemonManager._render_task_mcp_catalog(rows)
+
+    @staticmethod
+    def _redact_mcp_registration_for_prompt(cfg: dict) -> dict:
+        """Return a prompt-safe MCP registration copy.
+
+        The daemon runtime uses the full object for LingTai-backend MCP startup,
+        but the serialized context should not leak secret env/header values into
+        model prompts. Keys remain visible so CLI backends know what must be
+        supplied by their own environment/config.
+        """
+        out = dict(cfg)
+        for field in ("env", "headers"):
+            value = out.get(field)
+            if isinstance(value, dict):
+                out[field] = {k: "<redacted>" for k in value}
+        return out
+
+    @staticmethod
+    def _render_task_mcp_catalog(registrations: list[dict]) -> str | None:
+        if not registrations:
+            return None
+        safe = [DaemonManager._redact_mcp_registration_for_prompt(r)
+                for r in registrations]
+        body = yaml.safe_dump(
+            {"mcp": safe},
+            sort_keys=False,
+            allow_unicode=True,
+        ).strip()
+        return (
+            "The parent provided these MCP registrations for this daemon run. "
+            "They are one-run context: LingTai backend may load them directly; "
+            "CLI backends should use them only if their runtime can load MCP "
+            "registrations. Secret env/header values are redacted in this prompt.\n"
+            f"{body}"
+        )
+
+    def _connect_task_mcp_registrations(
+        self,
+        registrations: list[dict],
+    ) -> tuple[dict[str, FunctionSchema], dict, list[object]]:
+        """Start task-scoped MCP clients and return schemas/handlers/clients."""
+        if not registrations:
+            return {}, {}, []
+        from ...services.mcp import HTTPMCPClient, MCPClient
+
+        schemas: dict[str, FunctionSchema] = {}
+        handlers: dict = {}
+        clients: list[object] = []
+        licc_env = {"LINGTAI_AGENT_DIR": str(self._agent._working_dir)}
+        try:
+            for cfg in registrations:
+                name = cfg["name"]
+                if cfg["transport"] == "http":
+                    client = HTTPMCPClient(
+                        url=cfg["url"],
+                        headers=cfg.get("headers"),
+                    )
+                else:
+                    merged_env = {
+                        **licc_env,
+                        "LINGTAI_MCP_NAME": name,
+                        **(cfg.get("env") or {}),
+                    }
+                    client = MCPClient(
+                        command=cfg["command"],
+                        args=cfg.get("args"),
+                        env=merged_env,
+                    )
+                client.start()
+                clients.append(client)
+                for tool in client.list_tools():
+                    tool_name = tool["name"]
+                    if tool_name in schemas:
+                        raise ValueError(f"duplicate MCP tool name: {tool_name}")
+                    schema = dict(tool.get("schema", {}) or {})
+                    schema.pop("additionalProperties", None)
+
+                    def _make_handler(c, tn: str):
+                        def handler(tool_args: dict) -> dict:
+                            return c.call_tool(tn, tool_args)
+                        return handler
+
+                    schemas[tool_name] = FunctionSchema(
+                        name=tool_name,
+                        description=tool.get("description", ""),
+                        parameters=schema,
+                    )
+                    handlers[tool_name] = _make_handler(client, tool_name)
+        except Exception:
+            self._close_task_mcp_clients(clients)
+            raise
+        return schemas, handlers, clients
+
+    @staticmethod
+    def _close_task_mcp_clients(clients: list[object] | None) -> None:
+        for client in clients or []:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def _task_skill_catalog(self, spec: dict) -> str | None:
         """Return rendered YAML skill context selected for one daemon task."""
         raw = spec.get("skills")
@@ -709,12 +869,15 @@ class DaemonManager:
     def _combine_oneshot_context(
         system_prompt: str | None,
         skill_catalog: str | None,
+        mcp_catalog: str | None = None,
     ) -> str | None:
         parts = []
         if system_prompt:
             parts.append(system_prompt)
         if skill_catalog:
             parts.append("## Parent-selected skills\n" + skill_catalog)
+        if mcp_catalog:
+            parts.append("## Parent-provided MCP registrations\n" + mcp_catalog)
         return "\n\n".join(parts) or None
 
     @staticmethod
@@ -751,15 +914,17 @@ class DaemonManager:
         self,
         requested: list[str],
         preset_surface: tuple[dict, dict] | None = None,
+        mcp_surface: tuple[dict[str, FunctionSchema], dict] | None = None,
     ) -> tuple[list[FunctionSchema], dict]:
         """Build filtered tool schemas and dispatch map for an emanation.
 
         When ``preset_surface`` is provided (preset-driven emanation), the
         capability tools come from the preset's pre-instantiated sandbox
-        (``preset_surface = (schemas_by_name, handlers_by_name)``), unioned
-        with the parent's MCP tools (those don't bind to an LLM, so they
-        carry over). When ``preset_surface`` is None, the parent's currently
-        registered tool surface is used (today's behavior).
+        (``preset_surface = (schemas_by_name, handlers_by_name)``). Parent MCP
+        tools do not auto-inherit; task ``mcp`` provides complete one-run MCP
+        registrations whose tools are added through ``mcp_surface``. When
+        ``preset_surface`` is None, the parent's currently registered regular
+        capability surface is used, again plus only task-scoped MCP tools.
         """
         from ...capabilities import _GROUPS
 
@@ -775,20 +940,30 @@ class DaemonManager:
 
         intrinsic_schemas, intrinsic_handlers = self._daemon_intrinsic_surface()
         tool_names |= set(intrinsic_schemas)
+        mcp_schemas, mcp_handlers = mcp_surface or ({}, {})
+        parent_mcp_names = self._parent_mcp_tool_names()
+        reserved_names = ({s.name for s in self._agent._tool_schemas} - parent_mcp_names) | set(intrinsic_schemas)
+        mcp_collisions = set(mcp_schemas) & reserved_names
+        if mcp_collisions:
+            raise ValueError(
+                "Task MCP tools collide with existing parent/daemon tools: "
+                f"{sorted(mcp_collisions)}"
+            )
+        parent_mcp_requested = (tool_names & self._parent_mcp_tool_names()) - set(mcp_schemas)
+        if parent_mcp_requested:
+            raise ValueError(
+                "Parent MCP tools must be provided as task mcp registrations, "
+                f"not requested via tools: {sorted(parent_mcp_requested)}"
+            )
 
         if preset_surface is not None:
             preset_schemas, preset_handlers = preset_surface
-            # Available surface = preset capabilities ∪ parent's MCP tools ∪
-            # daemon-eligible intrinsics (currently email).
-            capability_names = {cap_name for cap_name, _ in self._agent._capabilities}
-            all_registered = {s.name for s in self._agent._tool_schemas}
-            mcp_names = all_registered - capability_names - EMANATION_BLACKLIST
-            available = set(preset_schemas.keys()) | mcp_names | set(intrinsic_schemas)
-            # MCP tools are auto-included (parent-bound, LLM-agnostic). The
-            # narrow daemon intrinsic surface is auto-included too: daemon
-            # follow-up/collaboration workflows commonly need email, and the
-            # bridge is still bounded to explicitly daemon-eligible intrinsics.
-            tool_names |= mcp_names | set(intrinsic_schemas)
+            # Available surface = preset capabilities ∪ task-scoped MCP tools
+            # ∪ daemon-eligible intrinsics (currently email).
+            available = set(preset_schemas.keys()) | set(mcp_schemas) | set(intrinsic_schemas)
+            # The narrow daemon intrinsic surface and task MCP surface are
+            # auto-included for this one run.
+            tool_names |= set(mcp_schemas) | set(intrinsic_schemas)
 
             missing = tool_names - available
             if missing:
@@ -807,21 +982,19 @@ class DaemonManager:
                     schemas.append(intrinsic_schemas[n])
                     if n in intrinsic_handlers:
                         dispatch[n] = intrinsic_handlers[n]
-                elif n in parent_schema_map:
-                    # MCP tool from parent
-                    schemas.append(parent_schema_map[n])
-                    if n in self._agent._tool_handlers:
-                        dispatch[n] = self._agent._tool_handlers[n]
+                elif n in mcp_schemas:
+                    schemas.append(mcp_schemas[n])
+                    if n in mcp_handlers:
+                        dispatch[n] = mcp_handlers[n]
             return schemas, dispatch
 
-        # Default path: emanation runs on parent's tool surface
-        capability_names = {cap_name for cap_name, _ in self._agent._capabilities}
-        all_registered = {s.name for s in self._agent._tool_schemas}
-        mcp_names = all_registered - capability_names - EMANATION_BLACKLIST
-        tool_names |= mcp_names
+        # Default path: emanation runs on the parent's capability surface plus
+        # task-scoped MCP tools from full registrations.
+        tool_names |= set(mcp_schemas)
 
         # Validate requested tools exist
-        available = {s.name for s in self._agent._tool_schemas} | set(intrinsic_schemas)
+        available = ({s.name for s in self._agent._tool_schemas}
+                     | set(intrinsic_schemas) | set(mcp_schemas))
         missing = tool_names - available
         if missing:
             raise ValueError(f"Unknown tools for emanation: {missing}")
@@ -832,14 +1005,26 @@ class DaemonManager:
         for n in sorted(tool_names):
             if n in intrinsic_schemas:
                 schemas.append(intrinsic_schemas[n])
+            elif n in mcp_schemas:
+                schemas.append(mcp_schemas[n])
             elif n in schema_map:
                 schemas.append(schema_map[n])
         dispatch = {n: self._agent._tool_handlers[n]
                     for n in tool_names if n in self._agent._tool_handlers}
         for n in tool_names:
+            if n in mcp_handlers:
+                dispatch[n] = mcp_handlers[n]
             if n in intrinsic_handlers:
                 dispatch[n] = intrinsic_handlers[n]
         return schemas, dispatch
+
+
+    def _parent_mcp_tool_names(self) -> set[str]:
+        """Return parent MCP tool names tracked by the parent agent."""
+        names = getattr(self._agent, "_mcp_tool_names", set())
+        if not isinstance(names, set):
+            return set()
+        return {n for n in names if isinstance(n, str)}
 
     def _expand_requested_tools(self, requested: list[str]) -> set[str]:
         """Expand requested daemon tools after group aliases and blacklist."""
@@ -968,8 +1153,9 @@ class DaemonManager:
             lines.append("")
             lines.append("## Parent-provided daemon context (oneshot)")
             lines.append(
-                "These parent instructions and selected skills apply only to "
-                "this daemon run. They may narrow how you complete the task, "
+                "These parent instructions and selected skills/MCP context "
+                "apply only to this daemon run. They may narrow how you complete "
+                "the task, "
                 "but they do not override the daemon lifecycle, cancellation/"
                 "timeout limits, available tool schema, or tool execution/"
                 "approval guard."
@@ -987,7 +1173,8 @@ class DaemonManager:
                        cancel_event: threading.Event,
                        timeout_event: threading.Event | None = None,
                        preset_llm: dict | None = None,
-                       max_turns: int | None = None) -> str:
+                       max_turns: int | None = None,
+                       mcp_clients: list[object] | None = None) -> str:
         """Run a single emanation's tool loop. Called in a worker thread.
 
         run_dir is the DaemonRunDir constructed in _handle_emanate. All
@@ -1154,6 +1341,8 @@ class DaemonManager:
         except Exception as e:
             run_dir.mark_failed(e)
             raise
+        finally:
+            self._close_task_mcp_clients(mcp_clients)
 
     def _find_claude_session_id(self, em_id: str) -> str | None:
         """Search ~/.claude/projects/ for the session JSONL whose customTitle matches em_id.
@@ -1919,8 +2108,8 @@ class DaemonManager:
             # Instantiate preset capabilities into a sandbox up front so any
             # setup-time failure refuses the whole batch (consistent with
             # connectivity refusal). Empty caps dict → empty sandbox surface,
-            # which means the emanation only gets MCP tools — that's a valid
-            # if unusual configuration.
+            # which means the emanation only gets task-scoped MCP tools —
+            # that's a valid if unusual configuration.
             try:
                 preset_schemas, preset_handlers = self._instantiate_preset_capabilities(
                     preset_caps,
@@ -1967,16 +2156,24 @@ class DaemonManager:
                     resolved["preset_schemas"],
                     resolved["preset_handlers"],
                 )
+            task_mcp_clients: list[object] = []
             try:
+                task_mcp_regs, task_mcp_catalog = self._task_mcp_registrations(spec)
+                mcp_schemas, mcp_handlers, task_mcp_clients = (
+                    self._connect_task_mcp_registrations(task_mcp_regs)
+                )
                 schemas, dispatch = self._build_tool_surface(
-                    spec["tools"], preset_surface=preset_surface,
+                    spec["tools"],
+                    preset_surface=preset_surface,
+                    mcp_surface=(mcp_schemas, mcp_handlers),
                 )
                 task_system_prompt = self._task_system_prompt(spec)
                 task_skill_catalog = self._task_skill_catalog(spec)
-            except ValueError as e:
+            except Exception as e:
+                self._close_task_mcp_clients(task_mcp_clients)
                 return {"status": "error", "message": str(e)}
             task_context = self._combine_oneshot_context(
-                task_system_prompt, task_skill_catalog
+                task_system_prompt, task_skill_catalog, task_mcp_catalog
             )
             system_prompt = self._build_emanation_prompt(
                 spec["task"], schemas, system_prompt=task_context
@@ -2008,6 +2205,7 @@ class DaemonManager:
                     preset_model=resolved["llm"].get("model") if resolved else None,
                 )
             except OSError as e:
+                self._close_task_mcp_clients(task_mcp_clients)
                 return {"status": "error",
                         "message": f"Failed to create daemon folder: {e}"}
 
@@ -2017,6 +2215,7 @@ class DaemonManager:
                 spec["task"], cancel_event, timeout_event,
                 resolved["llm"] if resolved else None,
                 effective_max_turns,
+                task_mcp_clients,
             )
             future.add_done_callback(
                 lambda f, eid=em_id, task=spec["task"]:
@@ -2067,10 +2266,13 @@ class DaemonManager:
         resolved_backend_argv: list[list[str]] = []
         task_system_prompts: list[str | None] = []
         task_skill_catalogs: list[str | None] = []
+        task_mcp_catalogs: list[str | None] = []
         for i, spec in enumerate(tasks):
             try:
                 task_system_prompts.append(self._task_system_prompt(spec))
                 task_skill_catalogs.append(self._task_skill_catalog(spec))
+                _, task_mcp_catalog = self._task_mcp_registrations(spec)
+                task_mcp_catalogs.append(task_mcp_catalog)
             except ValueError as e:
                 return {"status": "error",
                         "message": f"tasks[{i}]: {e}"}
@@ -2105,8 +2307,9 @@ class DaemonManager:
 
             task_system_prompt = task_system_prompts[i]
             task_skill_catalog = task_skill_catalogs[i]
+            task_mcp_catalog = task_mcp_catalogs[i]
             task_context = self._combine_oneshot_context(
-                task_system_prompt, task_skill_catalog
+                task_system_prompt, task_skill_catalog, task_mcp_catalog
             )
             system_prompt = f"[{backend} backend — task delegated to external CLI]"
             if task_context:
