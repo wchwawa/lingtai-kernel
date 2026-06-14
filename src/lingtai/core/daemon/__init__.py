@@ -629,7 +629,8 @@ class DaemonManager:
         """Resolve one daemon task skill path to a concrete SKILL.md file."""
         p = Path(raw_path).expanduser()
         if not p.is_absolute():
-            p = (working_dir / p).resolve(strict=False)
+            p = working_dir / p
+        p = p.resolve(strict=False)
         if p.is_dir():
             p = p / "SKILL.md"
         if not p.is_file():
@@ -654,8 +655,14 @@ class DaemonManager:
             raise ValueError(f"skill file has invalid YAML frontmatter: {skill_file}: {e}") from e
         if not isinstance(loaded, dict):
             raise ValueError(f"skill file frontmatter must be a mapping: {skill_file}")
-        name = " ".join(str(loaded.get("name", "")).split())
-        description = " ".join(str(loaded.get("description", "")).split())
+        raw_name = loaded.get("name")
+        raw_description = loaded.get("description")
+        name = " ".join(str(raw_name).split()) if raw_name is not None else ""
+        description = (
+            " ".join(str(raw_description).split())
+            if raw_description is not None
+            else ""
+        )
         if not name:
             raise ValueError(f"skill file missing required frontmatter field: name: {skill_file}")
         if not description:

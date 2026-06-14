@@ -323,6 +323,53 @@ def test_task_skills_reject_invalid_path(tmp_path):
         raise AssertionError("missing skill path should fail")
 
 
+def test_task_skills_reject_null_frontmatter_fields(tmp_path):
+    """Null YAML name/description values are treated as missing, not stringified."""
+    agent = _make_agent(tmp_path, ["daemon"])
+    mgr = agent.get_capability("daemon")
+    skill_dir = agent._working_dir / "local-skills" / "null-field"
+    skill_dir.mkdir(parents=True)
+
+    cases = [
+        ("name:\ndescription: Has description.\n", "name"),
+        ("name: null-field\ndescription:\n", "description"),
+    ]
+    for frontmatter, missing_field in cases:
+        (skill_dir / "SKILL.md").write_text(
+            "---\n" + frontmatter + "---\n# Null field\n",
+            encoding="utf-8",
+        )
+        try:
+            mgr._task_skill_catalog({"task": "x", "tools": [], "skills": ["local-skills/null-field"]})
+        except ValueError as e:
+            assert f"missing required frontmatter field: {missing_field}" in str(e)
+        else:  # pragma: no cover - defensive
+            raise AssertionError(f"null {missing_field} should fail")
+
+
+def test_task_skills_deduplicates_canonical_paths(tmp_path):
+    """Different spellings of the same selected skill render only one catalog row."""
+    agent = _make_agent(tmp_path, ["daemon"])
+    mgr = agent.get_capability("daemon")
+    skill_dir = agent._working_dir / "local-skills" / "dedup"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\n"
+        "name: dedup-skill\n"
+        "description: Dedup selected skill paths.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    rendered = mgr._task_skill_catalog(
+        {"task": "x", "tools": [], "skills": ["local-skills/dedup", str(skill_file)]}
+    )
+
+    assert rendered is not None
+    assert rendered.count("- name: dedup-skill") == 1
+
+
 def test_build_emanation_prompt_includes_selected_skills(tmp_path):
     """Selected skills are rendered into the daemon prompt before the task."""
     agent = _make_agent(tmp_path, ["file", "daemon"])
