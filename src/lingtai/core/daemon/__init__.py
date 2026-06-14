@@ -1657,7 +1657,8 @@ class DaemonManager:
         writes still happen unconditionally inside the worker; this gate is
         for the parent-facing notification only.
         """
-        if em_id not in self._emanations:
+        entry = self._emanations.get(em_id)
+        if entry is None or entry.get("shutdown_in_progress"):
             self._log(
                 "daemon_ask_post_reclaim",
                 em_id=em_id, status=status, text_length=len(text or ""),
@@ -3972,6 +3973,13 @@ class DaemonManager:
         wait_futures = futures + ask_futures
         cancelled = sum(1 for future in wait_futures if not future.done())
         errors: list[str] = []
+
+        # Mark entries before killing child processes. CLI ask workers can wake
+        # up immediately after the kill but before _emanations is cleared; the
+        # parent-facing follow-up notification gate must treat that window as
+        # post-reclaim too.
+        for entry in self._emanations.values():
+            entry["shutdown_in_progress"] = True
 
         # Kill all tracked CLI process groups first — this terminates child
         # shells/tools that cancel_event alone cannot reach (GH #122).
