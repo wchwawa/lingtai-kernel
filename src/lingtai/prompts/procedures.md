@@ -15,9 +15,13 @@ knowledge and reusable procedures in skills.
 ### Use the Right Body
 
 Use bash for one-off deterministic host work, daemons for disposable parallel
-exploration, avatars for persistent specialists, MCPs for durable external
+exploration and cheap deterministic work that would otherwise consume the main
+agent's context, avatars for persistent specialists, MCPs for durable external
 integrations, knowledge for private facts, and skills for reusable procedures.
-When unsure, read `system-manual`.
+Protecting the main context is a LingTai principle: the parent plans and
+synthesizes, daemons execute noisy work. For the full daemon methodology — pad
+workflow, cost efficiency, context hygiene, and parent/daemon division of labor —
+read `system-manual` → `reference/procedures-manual/SKILL.md`.
 
 ### Communication and Responsiveness
 
