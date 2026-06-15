@@ -237,6 +237,11 @@ def spill_oversized_result(
     if working_dir is None:
         manifest["spill_error"] = manifest.get("spill_error") or "no working_dir configured"
 
+    # When the sidecar could not be written (no working_dir or write
+    # failure), the full content is unreachable — mark as unavailable.
+    if spill_path_str is None:
+        manifest["artifact_state"] = "unavailable"
+
     # Hoist a small allowlist of provider-visible reserved fields from a
     # dict-shaped original onto the manifest, so loop-guard duplicate
     # warnings reach the wire even when the primary payload was too large to
@@ -425,6 +430,12 @@ def mark_expired_spill_manifests(working_dir: Path | str) -> int:
                 changed = True
         else:
             # Sidecar gone — mark expired.
+            expired_warning = (
+                "EXPIRED: This tool result was stored in a temporary "
+                "sidecar file that no longer exists. The full content is "
+                "unavailable. Use the preview below if sufficient, or "
+                "rerun the source tool to regenerate the result."
+            )
             if manifest.get("artifact_state") != "expired":
                 if now_iso is None:
                     now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat(
@@ -432,6 +443,7 @@ def mark_expired_spill_manifests(working_dir: Path | str) -> int:
                     )
                 manifest["artifact_state"] = "expired"
                 manifest["artifact_expired_at"] = now_iso
+                manifest["warning"] = expired_warning
                 changed = True
                 expired_count += 1
             elif "artifact_expired_at" not in manifest:
@@ -441,6 +453,10 @@ def mark_expired_spill_manifests(working_dir: Path | str) -> int:
                         timespec="seconds"
                     )
                 manifest["artifact_expired_at"] = now_iso
+                changed = True
+            # Always overwrite stale warning text on expired manifests.
+            if manifest.get("warning") != expired_warning:
+                manifest["warning"] = expired_warning
                 changed = True
 
     def _walk(value: Any) -> None:

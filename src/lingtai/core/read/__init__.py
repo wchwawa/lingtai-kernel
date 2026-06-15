@@ -51,11 +51,15 @@ def setup(agent: "BaseAgent") -> None:
             # tmp/tool-results/, it was an ephemeral sidecar artifact
             # that has been cleaned up.  Give a specific hint instead
             # of the generic "File not found".
-            rel = Path(path)
+            # Normalize to collapse ".." components so that e.g.
+            # tmp/tool-results/../not-a-spill.txt is NOT misclassified
+            # as a spill path.
             try:
-                rel = Path(path).relative_to(agent._working_dir)
-            except ValueError:
-                pass
+                rel = Path(path).resolve().relative_to(
+                    Path(agent._working_dir).resolve()
+                )
+            except (ValueError, OSError):
+                rel = Path(path)
             parts = rel.parts
             if len(parts) >= 3 and parts[0] == "tmp" and parts[1] == "tool-results":
                 return {
