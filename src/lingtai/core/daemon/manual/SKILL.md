@@ -147,7 +147,11 @@ files, not standalone top-level skills.
   easy to point at over copying or reviving a daemon session.
 - Each emanation is disposable memory but durable evidence: its folder persists
   after completion or reclaim until cleanup.
-- `daemon(action="list")` is a status overview, not a full transcript.
+- `daemon(action="list")` is the first layer of progressive disclosure: it
+  reads active in-memory runs plus historical `daemons/*/daemon.json` run
+  records, returning compact metadata, prompt/result previews, paths, and
+  optional `contains`/`status`/`last` filtering. It is not a full transcript;
+  use the returned paths for details.
 - Completion is push-notified; do not poll only to ask "is it done yet".
 - **Idle care before resting: completion is push-notified, but do not rest on
   that alone.** With daemon work pending and unverified-healthy, arm at least

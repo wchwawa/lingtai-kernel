@@ -15,10 +15,17 @@ inspecting `daemon(action="list")`, or passing CLI flags through `backend_option
 
 ## API note: `daemon(action="list")`
 
-`list` reports only currently-active emanations (in-memory registry). It includes
-`run_id` and `path` so you know where to read on disk. Historical
-(completed/failed/cancelled) emanations don't appear in `list` — find them by
-inspecting the agent's `daemons/` folder.
+`list` is a compact index over both currently tracked runs and historical run
+folders. By default it scans `daemons/*/daemon.json` and returns completed,
+failed, cancelled, timed-out, and running entries with `run_id`, `group_id`,
+`status`, `backend`, task preview, visible call parameters (`task`, `tools`,
+`skills`, redacted `mcp`, system-prompt preview when recorded), result preview,
+and filesystem paths. Use `contains` for case-insensitive substring search over
+that visible index, `status` for status filtering, `last` as a positive result
+limit, and `include_done=false` when you only want currently tracked in-memory
+runs. This is the first layer of progressive disclosure; read the returned
+`.prompt`/`result.txt` paths for detail, and grep `events.jsonl` /
+`chat_history.jsonl` / `token_ledger.jsonl` only for forensic depth.
 
 
 ## Bash harness subskills

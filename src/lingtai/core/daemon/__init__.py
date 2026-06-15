@@ -431,6 +431,18 @@ def get_schema(lang: str = "en") -> dict:
                 "minimum": 0,
                 "description": t(lang, "daemon.truncate"),
             },
+            "contains": {
+                "type": "string",
+                "description": t(lang, "daemon.contains"),
+            },
+            "status": {
+                "type": "string",
+                "description": t(lang, "daemon.status"),
+            },
+            "include_done": {
+                "type": "boolean",
+                "description": t(lang, "daemon.include_done"),
+            },
             "max_turns": {
                 "type": "integer",
                 "minimum": 1,
@@ -586,7 +598,12 @@ class DaemonManager:
                 backend=backend,
             )
         elif action == "list":
-            return self._handle_list()
+            return self._handle_list(
+                contains=args.get("contains", ""),
+                status_filter=args.get("status", "all"),
+                include_done=args.get("include_done", True),
+                limit=args.get("last"),
+            )
         elif action == "ask":
             return self._handle_ask(args.get("id", ""), args.get("message", ""))
         elif action == "check":
@@ -2199,6 +2216,13 @@ class DaemonManager:
                     parent_pid=parent_pid,
                     system_prompt=system_prompt,
                     group_id=group_id,
+                    call_parameters={
+                        "task": spec["task"],
+                        "tools": spec.get("tools", []),
+                        "skills": spec.get("skills", []),
+                        "mcp": [self._redact_mcp_registration_for_prompt(r) for r in task_mcp_regs],
+                        "system_prompt": task_system_prompt,
+                    },
                     log_callback=self._log,
                     preset_name=resolved["name"] if resolved else None,
                     preset_provider=resolved["llm"].get("provider") if resolved else None,
@@ -2267,11 +2291,13 @@ class DaemonManager:
         task_system_prompts: list[str | None] = []
         task_skill_catalogs: list[str | None] = []
         task_mcp_catalogs: list[str | None] = []
+        task_mcp_registrations: list[list[dict]] = []
         for i, spec in enumerate(tasks):
             try:
                 task_system_prompts.append(self._task_system_prompt(spec))
                 task_skill_catalogs.append(self._task_skill_catalog(spec))
-                _, task_mcp_catalog = self._task_mcp_registrations(spec)
+                task_mcp_regs, task_mcp_catalog = self._task_mcp_registrations(spec)
+                task_mcp_registrations.append(task_mcp_regs)
                 task_mcp_catalogs.append(task_mcp_catalog)
             except ValueError as e:
                 return {"status": "error",
@@ -2308,6 +2334,7 @@ class DaemonManager:
             task_system_prompt = task_system_prompts[i]
             task_skill_catalog = task_skill_catalogs[i]
             task_mcp_catalog = task_mcp_catalogs[i]
+            task_mcp_regs = task_mcp_registrations[i]
             task_context = self._combine_oneshot_context(
                 task_system_prompt, task_skill_catalog, task_mcp_catalog
             )
@@ -2331,6 +2358,14 @@ class DaemonManager:
                     parent_pid=parent_pid,
                     system_prompt=system_prompt,
                     group_id=group_id,
+                    call_parameters={
+                        "task": spec["task"],
+                        "tools": spec.get("tools", []),
+                        "skills": spec.get("skills", []),
+                        "mcp": [self._redact_mcp_registration_for_prompt(r) for r in task_mcp_regs],
+                        "system_prompt": task_system_prompt,
+                        "backend_options": backend_options,
+                    },
                     log_callback=self._log,
                     backend=backend,
                 )
@@ -2415,36 +2450,177 @@ class DaemonManager:
         return {"status": "dispatched", "count": len(tasks), "ids": ids,
                 "group_id": group_id, "backend": backend}
 
-    def _handle_list(self) -> dict:
-        emanations = []
+    @staticmethod
+    def _truncate_list_string(value: object, limit: int = 500) -> object:
+        if not isinstance(value, str):
+            return value
+        if len(value) <= limit:
+            return value
+        return value[:limit] + "…[truncated]"
+
+    @staticmethod
+    def _list_search_blob(info: dict) -> str:
+        try:
+            return json.dumps(info, ensure_ascii=False, sort_keys=True).lower()
+        except (TypeError, ValueError):
+            return str(info).lower()
+
+    def _daemon_prompt_preview(self, run_path: Path, limit: int = 500) -> tuple[str | None, int | None]:
+        prompt_path = run_path / ".prompt"
+        try:
+            size = prompt_path.stat().st_size
+            with open(prompt_path, encoding="utf-8") as f:
+                text = f.read(limit + 1)
+        except OSError:
+            return None, None
+        return self._truncate_list_string(text, limit), size
+
+    def _daemon_list_entry_from_state(
+        self,
+        state: dict,
+        run_path: Path,
+        *,
+        active_status: str | None = None,
+        active_elapsed: int | None = None,
+        active_error: BaseException | None = None,
+    ) -> dict:
+        status = active_status or state.get("state") or "unknown"
+        call_params = state.get("call_parameters")
+        if not isinstance(call_params, dict):
+            call_params = {}
+        prompt_preview, prompt_chars = self._daemon_prompt_preview(run_path)
+        visible_call_params = {
+            "task": self._truncate_list_string(call_params.get("task", state.get("task"))),
+            "tools": call_params.get("tools", state.get("tools", [])),
+            "skills": call_params.get("skills", []),
+            "mcp": call_params.get("mcp", []),
+            "system_prompt_preview": self._truncate_list_string(call_params.get("system_prompt")),
+        }
+        visible_call_params = {k: v for k, v in visible_call_params.items() if v not in (None, [], "")}
+        info = {
+            "id": state.get("handle"),
+            "task": self._truncate_list_string(state.get("task", ""), 120),
+            "status": status,
+            "elapsed_s": active_elapsed if active_elapsed is not None else state.get("elapsed_s"),
+            "run_id": state.get("run_id"),
+            "group_id": state.get("group_id"),
+            "backend": state.get("backend"),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+            "path": str(run_path),
+            "result_preview": state.get("result_preview"),
+            "result_path": state.get("result_path"),
+            "call_parameters": visible_call_params,
+        }
+        if prompt_preview is not None:
+            info["system_prompt_preview"] = prompt_preview
+            info["system_prompt_bytes"] = prompt_chars
+            info["system_prompt_path"] = str(run_path / ".prompt")
+        if active_error is not None:
+            info["error"] = str(active_error)
+        elif state.get("error"):
+            info["error"] = state.get("error")
+        return {k: v for k, v in info.items() if v is not None}
+
+    def _iter_daemon_history_states(self) -> list[tuple[Path, dict]]:
+        daemons_dir = self._agent._working_dir / "daemons"
+        if not daemons_dir.is_dir():
+            return []
+        rows: list[tuple[Path, dict]] = []
+        for daemon_json_path in daemons_dir.glob("*/daemon.json"):
+            try:
+                state = json.loads(daemon_json_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(state, dict):
+                rows.append((daemon_json_path.parent, state))
+        return rows
+
+    def _handle_list(
+        self,
+        contains: str | None = "",
+        status_filter: str | None = "all",
+        include_done: bool = True,
+        limit: int | None = None,
+    ) -> dict:
+        try:
+            limit_int = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            return {"status": "error", "message": f"last must be a positive integer (got {limit!r})"}
+        if limit_int is not None and limit_int < 1:
+            return {"status": "error", "message": f"last must be ≥ 1 (got {limit_int})"}
+        if limit_int is not None:
+            limit_int = min(limit_int, self._CHECK_LAST_MAX)
+
+        query = (contains or "").strip().lower()
+        wanted_status = (status_filter or "all").strip().lower()
+        include_done = include_done is not False
+
+        emanations: list[dict] = []
         running = 0
+        active_run_ids: set[str] = set()
+
         for em_id, entry in self._emanations.items():
             elapsed = time.time() - entry["start_time"]
             future = entry["future"]
+            exc = None
             if future.done():
                 exc = future.exception()
-                if exc:
-                    status = "failed"
-                else:
-                    status = "done"
+                status = "failed" if exc else "done"
             else:
                 status = "running"
                 running += 1
-                exc = None
-            info = {"id": em_id, "task": entry["task"][:80],
-                    "status": status, "elapsed_s": round(elapsed)}
-            if status == "failed" and exc:
-                info["error"] = str(exc)
             run_dir = entry.get("run_dir")
             if run_dir is not None:
-                info["run_id"] = run_dir.run_id
-                info["group_id"] = run_dir.state_snapshot().get("group_id")
-                info["path"] = str(run_dir.path)
+                state = run_dir.state_snapshot()
+                state.setdefault("handle", em_id)
+                active_run_ids.add(run_dir.run_id)
+                info = self._daemon_list_entry_from_state(
+                    state, run_dir.path, active_status=status,
+                    active_elapsed=round(elapsed), active_error=exc,
+                )
+            else:
+                info = {
+                    "id": em_id,
+                    "task": self._truncate_list_string(entry.get("task", ""), 120),
+                    "status": status,
+                    "elapsed_s": round(elapsed),
+                }
+                if exc:
+                    info["error"] = str(exc)
             emanations.append(info)
+
+        if include_done:
+            for run_path, state in self._iter_daemon_history_states():
+                run_id = state.get("run_id")
+                if isinstance(run_id, str) and run_id in active_run_ids:
+                    continue
+                info = self._daemon_list_entry_from_state(state, run_path)
+                if info.get("status") == "running":
+                    running += 1
+                emanations.append(info)
+
+        total_before_filter = len(emanations)
+        if wanted_status and wanted_status != "all":
+            emanations = [e for e in emanations if str(e.get("status", "")).lower() == wanted_status]
+        if query:
+            emanations = [e for e in emanations if query in self._list_search_blob(e)]
+
+        def _sort_key(item: dict) -> str:
+            return str(item.get("started_at") or item.get("run_id") or "")
+        emanations.sort(key=_sort_key, reverse=True)
+        total_matches = len(emanations)
+        if limit_int is not None:
+            emanations = emanations[:limit_int]
         return {
             "emanations": emanations,
             "running": running,
             "max_emanations": self._max_emanations,
+            "history_included": include_done,
+            "index": "daemon_run_dirs",
+            "total_before_filter": total_before_filter,
+            "total_matches": total_matches,
+            "showing": len(emanations),
         }
 
     def _handle_ask(self, em_id: str, message: str) -> dict:

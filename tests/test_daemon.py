@@ -30,20 +30,30 @@ def _make_agent(tmp_path, capabilities=None):
     return agent
 
 
-def _make_run_dir(agent, em_id="em-test"):
+def _make_run_dir(
+    agent,
+    em_id="em-test",
+    *,
+    task="test task",
+    tools=None,
+    system_prompt="You are a daemon.",
+    call_parameters=None,
+):
     """Helper: build a DaemonRunDir matching the new _run_emanation signature."""
     from lingtai.core.daemon.run_dir import DaemonRunDir
+    tools = ["file"] if tools is None else tools
     return DaemonRunDir(
         parent_working_dir=agent._working_dir,
         handle=em_id,
-        task="test task",
-        tools=["file"],
+        task=task,
+        tools=tools,
         model="mock-model",
         max_turns=30,
         timeout_s=300.0,
         parent_addr=agent._working_dir.name,
         parent_pid=12345,
-        system_prompt="You are a daemon.",
+        system_prompt=system_prompt,
+        call_parameters=call_parameters,
     )
 
 
@@ -834,6 +844,77 @@ def test_handle_list_shows_status(tmp_path):
     statuses = {e["id"]: e["status"] for e in result["emanations"]}
     assert statuses["em-1"] == "done"
     assert statuses["em-2"] == "running"
+
+
+def test_handle_list_includes_historical_done_run_dirs(tmp_path):
+    """list scans daemon run dirs so completed daemons remain discoverable."""
+    agent = _make_agent(tmp_path, ["file", "daemon"])
+    mgr = agent.get_capability("daemon")
+    rd = _make_run_dir(
+        agent,
+        em_id="em-history",
+        task="summarize alpha history",
+        tools=["file", "bash"],
+        system_prompt="custom system prompt alpha",
+        call_parameters={
+            "task": "summarize alpha history",
+            "tools": ["file", "bash"],
+            "skills": ["daemon-manual"],
+            "mcp": [{"name": "docs", "transport": "stdio", "env": {"TOKEN": "<redacted>"}}],
+            "system_prompt": "custom system prompt alpha",
+        },
+    )
+    rd.mark_done("needle result with artifact path reports/alpha.md")
+
+    # Simulate a later manager/session: no live _emanations, only run-dir files.
+    listing = mgr._handle_list()
+    matches = [e for e in listing["emanations"] if e.get("run_id") == rd.run_id]
+    assert len(matches) == 1
+    em = matches[0]
+    assert listing["history_included"] is True
+    assert listing["index"] == "daemon_run_dirs"
+    assert em["id"] == "em-history"
+    assert em["status"] == "done"
+    assert em["path"].endswith(rd.run_id)
+    assert em["result_path"].endswith("result.txt")
+    assert "needle result" in em["result_preview"]
+    assert em["system_prompt_path"].endswith(".prompt")
+    assert "custom system prompt alpha" in em["system_prompt_preview"]
+    assert em["call_parameters"]["skills"] == ["daemon-manual"]
+    assert em["call_parameters"]["mcp"][0]["env"] == {"TOKEN": "<redacted>"}
+
+
+def test_handle_list_filters_history_by_contains_status_and_last(tmp_path):
+    """list supports lightweight progressive-disclosure search over run metadata."""
+    agent = _make_agent(tmp_path, ["file", "daemon"])
+    mgr = agent.get_capability("daemon")
+    alpha = _make_run_dir(agent, em_id="em-alpha", task="alpha task")
+    alpha.mark_done("alpha result contains unique-needle")
+    beta = _make_run_dir(agent, em_id="em-beta", task="beta task")
+    beta.mark_failed(RuntimeError("beta failed unique-needle"))
+
+    done_listing = mgr._handle_list(contains="unique-needle", status_filter="done")
+    assert done_listing["total_matches"] == 1
+    assert done_listing["emanations"][0]["run_id"] == alpha.run_id
+
+    failed_listing = mgr._handle_list(contains="unique-needle", status_filter="failed", limit=1)
+    assert failed_listing["total_matches"] == 1
+    assert failed_listing["showing"] == 1
+    assert failed_listing["emanations"][0]["run_id"] == beta.run_id
+    assert "beta failed" in str(failed_listing["emanations"][0]["error"])
+
+    hidden_history = mgr._handle_list(include_done=False)
+    assert all(e.get("run_id") not in {alpha.run_id, beta.run_id} for e in hidden_history["emanations"])
+    assert hidden_history["history_included"] is False
+
+
+def test_handle_list_rejects_non_positive_last(tmp_path):
+    """list reuses last as a positive limit, not a zero/negative slice."""
+    agent = _make_agent(tmp_path, ["daemon"])
+    mgr = agent.get_capability("daemon")
+    result = mgr._handle_list(limit=0)
+    assert result["status"] == "error"
+    assert "last must be" in result["message"]
 
 
 def test_handle_ask_sends_followup(tmp_path):
