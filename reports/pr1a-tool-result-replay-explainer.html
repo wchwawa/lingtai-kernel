@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR1A Explainer — Replay recorded tool results before synthetic heal</title>
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --ink:#e5e7eb; --muted:#9ca3af; --accent:#38bdf8; --ok:#22c55e; --warn:#f59e0b; --line:#334155; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:linear-gradient(135deg,#020617,#111827); color:var(--ink); }
+    main { max-width:1100px; margin:0 auto; padding:36px 22px 60px; }
+    h1 { font-size:30px; margin:0 0 8px; }
+    h2 { margin-top:30px; padding-top:18px; border-top:1px solid var(--line); font-size:21px; }
+    h3 { margin-top:20px; color:#bae6fd; }
+    p, li { color:var(--ink); }
+    .muted { color:var(--muted); }
+    .card { background:rgba(17,24,39,.86); border:1px solid var(--line); border-radius:16px; padding:18px; margin:16px 0; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+    .pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:3px 10px; margin:2px 6px 2px 0; color:#bfdbfe; background:#0b1220; font-size:13px; }
+    .ok { color:var(--ok); font-weight:700; }
+    .warn { color:var(--warn); font-weight:700; }
+    code, pre { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    code { background:#020617; padding:2px 5px; border-radius:5px; }
+    pre { white-space:pre-wrap; background:#020617; border:1px solid var(--line); border-radius:12px; padding:14px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; margin:12px 0; }
+    th, td { border:1px solid var(--line); padding:9px 10px; vertical-align:top; }
+    th { background:#0b1220; text-align:left; color:#bae6fd; }
+    a { color:var(--accent); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>PR1A Explainer — Replay recorded tool results before synthetic heal</h1>
+  <p class="muted">Branch: <code>codex/pr1a-tool-result-replay-20260615</code>. Worktree: <code>/private/tmp/lingtai-kernel-pr1a-tool-result-replay</code>.</p>
+
+  <section class="card">
+    <h2>Conclusion</h2>
+    <p><strong>PR1A adds a replay-first safety net for pending tool-call healing.</strong> When the conversation tail has unanswered tool calls, the kernel now checks <code>logs/events.jsonl</code> for an already-executed real <code>tool_result</code> before inserting a synthetic “may or may not have happened” heal result.</p>
+    <p>This directly addresses the failure mode where a tool side effect/result was durably logged but the model-visible wire history was later healed with a placeholder, losing the real payload.</p>
+    <p><span class="pill">single close point</span><span class="pill">bounded event-log scan</span><span class="pill">spill before replay</span><span class="pill">safe metadata logs</span><span class="pill">synthetic fallback preserved</span></p>
+  </section>
+
+  <section>
+    <h2>Issue cluster</h2>
+    <p>Relevant anchors: <code>Lingtai-AI/lingtai#126</code>, <code>#130</code>, <code>#131</code>, <code>#170</code>, and the already-executed-result half of <code>#223</code>.</p>
+    <table>
+      <tr><th>Symptom</th><th>Why PR1A helps</th></tr>
+      <tr><td>External channel read/check results were logged but not delivered to the agent wire.</td><td>Heal now looks for the exact durable <code>tool_result</code> before synthesizing uncertainty.</td></tr>
+      <tr><td>Notification wake hit a pending tool-call tail and inserted <code>heal:idle_inject_blocked</code>.</td><td>The notification heal path flows through <code>close_pending_tool_calls()</code>, so it can replay the real result first.</td></tr>
+      <tr><td>Oversized recovered results could otherwise re-enter the prompt raw.</td><td>Recovered payloads go through existing <code>spill_oversized_result(..., source="recovered_from_events")</code>.</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Root cause</h2>
+    <div class="card">
+      <p>A tool result can exist in two places at different moments:</p>
+      <ol>
+        <li><strong>Durable event log:</strong> <code>ToolExecutor</code> logs raw <code>tool_result</code> rows to <code>logs/events.jsonl</code> immediately after tool execution.</li>
+        <li><strong>Conversation wire:</strong> the turn loop later appends model-visible <code>ToolResultBlock</code>s to <code>ChatInterface</code>.</li>
+      </ol>
+      <p>If execution succeeded but the wire update/continuation path failed or was rolled back, later recovery saw only a pending assistant tool-call tail. The old behavior synthesized a placeholder without consulting the durable log. The real result was present, but not replayed.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>What changed</h2>
+    <div class="grid">
+      <div class="card"><h3>Recovery helper</h3><p>New <code>tool_result_recovery.py</code> reverse-scans <code>&lt;workdir&gt;/logs/events.jsonl</code> from the tail, bounded by bytes/events. It matches exact <code>tool_call_id</code>; if <code>tool_name</code> is present, it must match too. Newest match wins.</p></div>
+      <div class="card"><h3>Central wiring</h3><p><code>ChatInterface.close_pending_tool_calls()</code> now accepts an optional lookup. For each pending call: recovered real block first; otherwise the existing synthetic fallback.</p></div>
+      <div class="card"><h3>Agent/session attachment</h3><p><code>BaseAgent</code> passes its recovery callback to <code>SessionManager</code>, which attaches it to created, rebuilt, restored, and manually assigned chat interfaces.</p></div>
+      <div class="card"><h3>Safety</h3><p>Lookup failures never break healing. Replayed oversized results are spilled before append. New replay/miss/failure telemetry excludes raw <code>result</code> and <code>tool_args</code>.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Validation</h2>
+    <p class="ok">Focused tests passed after final anatomy/doc edits.</p>
+    <pre>python3 -m compileall -q \
+  src/lingtai_kernel/tool_result_recovery.py \
+  src/lingtai_kernel/llm/interface.py \
+  src/lingtai_kernel/session.py \
+  src/lingtai_kernel/base_agent/__init__.py \
+  tests/test_tool_result_recovery.py \
+  tests/test_chat_interface_invariant.py \
+  tests/test_notification_sync.py \
+  tests/test_session.py
+# passed
+
+PYTHONPATH=src uv run --no-project --with pytest python -m pytest tests/test_tool_result_recovery.py -q
+# 8 passed
+
+PYTHONPATH=src uv run --no-project --with pytest python -m pytest \
+  tests/test_chat_interface_invariant.py::TestClosePendingToolCalls \
+  tests/test_notification_sync.py::test_sync_idle_heal_replays_recorded_tool_result_before_notification \
+  tests/test_notification_sync.py::test_sync_idle_heal_falls_back_to_synthetic_when_no_recorded_result \
+  tests/test_session.py::test_health_check_heals_pending_tool_calls_on_user_message \
+  tests/test_session.py::test_restore_chat_with_state \
+  tests/test_session.py::test_restore_chat_fallback_on_error \
+  -q
+# 11 passed</pre>
+    <p class="warn">Environment limitation:</p>
+    <ul>
+      <li>Full project <code>uv run pytest</code> was blocked before tests by <code>onnxruntime==1.26.0</code> lacking a macOS x86_64 wheel on this host.</li>
+      <li>Broader minimal-runner checks in the daemon passed with package-metadata adapter tests deselected; those tests import <code>lingtai</code> as an installed distribution, which the <code>uv --no-project</code> environment does not provide.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Risks and boundaries</h2>
+    <ul>
+      <li><strong>Bounded recovery:</strong> a matching event older than the scan window misses and falls back to the existing synthetic heal.</li>
+      <li><strong>No semantic guessing:</strong> recovery only trusts exact IDs and exact tool names when present. It does not infer from tool args or result text.</li>
+      <li><strong>No PR2A/PR3A scope:</strong> WorkerStillRunning poison recovery and daemon terminal-state classification are separate PRs.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Reviewer map</h2>
+    <ul>
+      <li><code>src/lingtai_kernel/tool_result_recovery.py</code> — bounded event-log replay helper.</li>
+      <li><code>src/lingtai_kernel/llm/interface.py</code> — replay-first close behavior.</li>
+      <li><code>src/lingtai_kernel/session.py</code>, <code>base_agent/__init__.py</code> — lookup attachment.</li>
+      <li><code>tests/test_tool_result_recovery.py</code> — exact match, newest match, scan bound, mismatch, spill, safe logging, mixed multi-call.</li>
+      <li><code>tests/test_notification_sync.py</code> — IDLE notification wake-heal replay and fallback integration.</li>
+      <li><code>ANATOMY.md</code> files — updated architecture notes for the replay-first close point and new spill source.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

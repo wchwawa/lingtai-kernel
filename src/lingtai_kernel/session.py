@@ -48,6 +48,7 @@ class SessionManager:
         build_tool_schemas_fn: Callable[[], list[FunctionSchema]],
         logger_fn: Callable[..., None] | None,
         build_system_batches_fn: Callable[[], list[str]] | None = None,
+        tool_result_recovery_lookup_fn: Callable[[Any], Any] | None = None,
     ):
         self._llm_service = llm_service
         self._config = config
@@ -57,6 +58,7 @@ class SessionManager:
         self._build_system_prompt_fn = build_system_prompt_fn
         self._build_tool_schemas_fn = build_tool_schemas_fn
         self._logger_fn = logger_fn
+        self._tool_result_recovery_lookup_fn = tool_result_recovery_lookup_fn
         # Optional batched system-prompt builder. When provided, adapters
         # that support per-block caching receive mutation-frequency batches
         # and can place cache breakpoints between them. When absent, the
@@ -99,6 +101,7 @@ class SessionManager:
     @chat.setter
     def chat(self, value: ChatSession | None) -> None:
         self._chat = value
+        self._attach_tool_result_recovery_lookup(value)
 
     @property
     def token_decomp_dirty(self) -> bool:
@@ -154,6 +157,7 @@ class SessionManager:
                 interaction_id=self._interaction_id,
                 provider=self._config.provider,
             )
+            self._attach_tool_result_recovery_lookup(self._chat)
         return self._chat
 
     def _rebuild_session(
@@ -170,6 +174,18 @@ class SessionManager:
             provider=self._config.provider,
             interface=interface,
         )
+        self._attach_tool_result_recovery_lookup(self._chat)
+
+    def _attach_tool_result_recovery_lookup(self, chat: ChatSession | None) -> None:
+        if chat is None or self._tool_result_recovery_lookup_fn is None:
+            return
+        interface = getattr(chat, "interface", None)
+        if interface is None:
+            return
+        try:
+            interface.tool_result_recovery_lookup = self._tool_result_recovery_lookup_fn
+        except Exception:
+            pass
 
     def _health_check(self, message: Any) -> None:
         """Pre-send invariant checks on the canonical interface.
@@ -423,7 +439,8 @@ class SessionManager:
            assistant[tool_calls], which is deferred).
         2. Positional violations (assistant[tool_calls] at tail with no
            matching tool_results) — handled by close_pending_tool_calls(),
-           which synthesizes placeholder error results so the next send is
+           which replays durable real results when available, otherwise
+           synthesizes placeholder error results so the next send is
            well-formed for strict providers (DeepSeek, OpenAI).
         """
         from .llm.interface import ChatInterface
@@ -431,6 +448,7 @@ class SessionManager:
         if messages:
             try:
                 interface = ChatInterface.from_dict(messages)
+                interface.tool_result_recovery_lookup = self._tool_result_recovery_lookup_fn
                 interface.enforce_tool_pairing()
                 if interface.has_pending_tool_calls():
                     interface.close_pending_tool_calls(

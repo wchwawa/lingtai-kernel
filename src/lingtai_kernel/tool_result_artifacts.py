@@ -139,7 +139,8 @@ def spill_oversized_result(
     and returns a small dict containing a warning, the artifact paths (both
     workdir-relative and absolute), original size, cap, tool/call metadata,
     a UTC timestamp, a short preview, and a ``source`` field marking which
-    code path produced the spill (``"preventive"`` or ``"retroactive"``).
+    code path produced the spill (for example ``"preventive"``,
+    ``"retroactive"``, or ``"recovered_from_events"``).
 
     When the original is a dict, reserved provider-visible fields listed in
     ``_HOISTED_RESERVED_FIELDS`` (currently ``_advisory``) are

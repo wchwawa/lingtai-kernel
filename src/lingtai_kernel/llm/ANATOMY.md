@@ -43,5 +43,5 @@ Provider-agnostic LLM protocol layer. This folder defines the canonical chat log
 ## Notes
 
 - `add_system()` defers system/tool updates while the tail has unanswered tool calls so strict providers do not see a system entry between assistant tool calls and user tool results (`llm/interface.py:448-496`).
-- `close_pending_tool_calls()` synthesizes abort `ToolResultBlock`s with guidance and short recovery metadata to verify side effects before retrying (`llm/interface.py:405-445`, `llm/interface.py:66-155`).
+- `close_pending_tool_calls()` closes unanswered tail tool calls by first accepting optional real recovered `ToolResultBlock`s from a recovery lookup and then synthesizing abort placeholders for any remaining misses (`llm/interface.py:445-515`, `llm/interface.py:99-186`).
 - `StreamingAccumulator` intentionally supports three provider styles in one place: sequential, index-keyed, and atomic tool calls (`llm/streaming.py:71-126`).
