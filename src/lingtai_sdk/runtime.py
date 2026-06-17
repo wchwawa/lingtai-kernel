@@ -47,6 +47,10 @@ class RuntimeOptions:
     A backend-neutral superset of what ``Agent`` / ``init.json`` consume today.
     A future ``NativeRuntime`` translates these into a kernel ``Agent``; other
     backends translate them into their own client config.
+
+    Mapping-typed fields are backed by ordinary ``dict`` default factories for
+    ergonomic construction in this seed contract. Runtime adapters should copy
+    or freeze them if they need immutability.
     """
 
     working_dir: str | Path

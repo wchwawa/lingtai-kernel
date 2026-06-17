@@ -71,7 +71,14 @@ class TransportSpec:
 
 @dataclass
 class BundleManifest:
-    """The full public declaration of a capability bundle."""
+    """The full public declaration of a capability bundle.
+
+    Manifests are intentionally mutable in this seed contract so future assembly
+    code can build them incrementally before freezing/validation policy is
+    finalized. Call ``validate()`` explicitly before treating a manifest as
+    trusted; this PR does not auto-validate in ``__post_init__`` so callers can
+    surface multiple construction errors in later loaders.
+    """
 
     name: str
     version: str
