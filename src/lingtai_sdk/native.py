@@ -82,6 +82,35 @@ _LLM_FIELDS = ("provider", "model", "base_url", "api_key")
 _MANIFEST_LLM_FIELDS = ("provider", "model", "base_url", "api_key")
 
 
+#: Maps a wrapper ``AgentState`` *value* onto the SDK's backend-neutral
+#: :class:`RuntimeState`. The wrapper's life-states (``active``/``idle``/
+#: ``stuck``/``asleep``/``suspended``) each have a same-named ``RuntimeState``;
+#: ``RuntimeState.PENDING`` (pre-start) and ``RuntimeState.STOPPED`` (post-stop)
+#: are SDK-lifecycle-only and have no agent equivalent. Any value not in this
+#: table is an unknown/abnormal life-state and is coerced to ``STUCK`` rather
+#: than leaked verbatim, so ``STATE`` event payloads always carry a valid
+#: ``RuntimeState`` value (see the ``events()`` contract in ``runtime.py``).
+_AGENT_STATE_TO_RUNTIME: dict[str, RuntimeState] = {
+    RuntimeState.ACTIVE.value: RuntimeState.ACTIVE,
+    RuntimeState.IDLE.value: RuntimeState.IDLE,
+    RuntimeState.STUCK.value: RuntimeState.STUCK,
+    RuntimeState.ASLEEP.value: RuntimeState.ASLEEP,
+    RuntimeState.SUSPENDED.value: RuntimeState.SUSPENDED,
+}
+
+
+def _map_agent_state(raw: Any) -> RuntimeState:
+    """Map a raw agent life-state onto a :class:`RuntimeState`.
+
+    ``raw`` may be an ``AgentState`` enum member (``str`` enum → ``.value``) or a
+    plain string (test fakes). Unrecognized values map to ``STUCK`` — the
+    abnormal/unknown bucket — so SDK consumers never see an out-of-taxonomy
+    string. Pure; never imports ``lingtai``.
+    """
+    value = getattr(raw, "value", None) or str(raw)
+    return _AGENT_STATE_TO_RUNTIME.get(value, RuntimeState.STUCK)
+
+
 def _agent_kwargs_from_options(
     options: RuntimeOptions,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -602,8 +631,12 @@ class NativeRuntimeSession(RuntimeSession):
 
         The agent owns its life-state on its loop thread; rather than splice a
         callback into that thread, we read ``agent._state`` whenever a consumer
-        polls ``events()``. ``AgentState`` is a ``str`` enum, so ``str(...)``
-        yields its value; a plain string (test fakes) passes through.
+        polls ``events()``. The raw life-state is mapped onto the SDK's
+        :class:`RuntimeState` taxonomy via :func:`_map_agent_state` (unknown
+        values coerce to ``STUCK``), so the emitted ``STATE`` payload always
+        carries a valid ``RuntimeState`` value per the ``events()`` contract.
+        Dedup is on the *mapped* value, so two distinct raw states that collapse
+        to the same ``RuntimeState`` only emit once.
         """
         agent = self._agent
         if agent is None:
@@ -611,7 +644,7 @@ class NativeRuntimeSession(RuntimeSession):
         raw = getattr(agent, "_state", None)
         if raw is None:
             return
-        value = getattr(raw, "value", None) or str(raw)
+        value = _map_agent_state(raw).value
         with self._lock:
             if value == self._last_agent_state:
                 return

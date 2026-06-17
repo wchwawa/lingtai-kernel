@@ -43,9 +43,11 @@ class FakeSession(rt.RuntimeSession):
         self._events.append(rt.RuntimeEvent.text(f"echo:{msg.content}", source=self.source))
 
     def events(self):
-        events = list(self._events)
-        self._events.clear()
-        return iter(events)
+        # Contract-conformant: a non-draining, re-iterable cumulative snapshot
+        # (matching ``NativeRuntimeSession.events()``). Every call returns *all*
+        # events emitted so far; the facade/cursor — not the session — is
+        # responsible for any incremental "drain-like" view.
+        return iter(list(self._events))
 
     def stop(self, timeout: float = 5.0) -> None:
         self.stopped = True
@@ -63,6 +65,31 @@ class FakeRuntime(rt.Runtime):
         session = FakeSession(options)
         self.sessions.append(session)
         return session
+
+
+def test_client_query_does_not_double_count_against_snapshot_session(tmp_path):
+    """``query()`` must not double-count events against a non-draining session.
+
+    Regression for the whole-stack review finding: ``query()`` appended
+    ``session.events()`` after ``send`` and again after ``stop``. ``events()`` is
+    a cumulative snapshot (``FakeSession`` now conforms, like
+    ``NativeRuntimeSession``), so the second call re-returns the start+text
+    events — the result then carried them twice. Each event must appear once.
+    """
+    runtime = FakeRuntime()
+    client = LingTaiClient(runtime=runtime, options=rt.RuntimeOptions(working_dir=tmp_path))
+
+    result = client.query("hello")
+
+    assert result.text == "echo:hello"
+    assert [event.kind for event in result.events] == [
+        rt.EventKind.STATE,
+        rt.EventKind.TEXT,
+        rt.EventKind.STATE,
+    ]
+    # Event identities must be unique — no event appears twice.
+    ids = [event.id for event in result.events]
+    assert len(ids) == len(set(ids))
 
 
 def test_client_query_sends_message_collects_text_and_stops(tmp_path):
@@ -164,6 +191,31 @@ def test_open_session_keeps_session_live_for_multiple_messages(tmp_path):
     final_events = session.close()
     assert runtime.sessions[0].stopped is True
     assert [event.kind for event in final_events] == [rt.EventKind.STATE]
+
+
+def test_open_session_incremental_reads_against_snapshot_session(tmp_path):
+    """``LingTaiSession`` gives an incremental view over a non-draining session.
+
+    The session facade must own its own read cursor rather than rely on the
+    underlying ``RuntimeSession.events()`` draining (which it must not — the
+    contract is a cumulative snapshot). So ``text()`` consumes the new events it
+    drained, the following ``events()`` sees nothing new, and ``close()`` returns
+    only the final ``STATE`` event — even though the underlying session keeps
+    every event in its snapshot.
+    """
+    runtime = FakeRuntime()
+    client = LingTaiClient(runtime=runtime, options=rt.RuntimeOptions(working_dir=tmp_path))
+
+    session = client.open_session()
+    session.send("one").send("two", sender="ops")
+    # text() drains the START + two TEXT events emitted so far.
+    assert session.text() == "echo:oneecho:two"
+    # Nothing new since the last read — even though the snapshot still holds all.
+    assert session.events() == ()
+    final_events = session.close()
+    assert [event.kind for event in final_events] == [rt.EventKind.STATE]
+    # The underlying session never drained: its snapshot retains everything.
+    assert len(list(runtime.sessions[0].events())) == 4
 
 
 def test_open_session_helper_and_context_manager_close(tmp_path):

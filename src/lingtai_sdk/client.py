@@ -81,11 +81,23 @@ class LingTaiSession:
     This facade is for multi-message / streaming-ish use cases where callers
     want to keep a session open and decide when to poll events or close it. It
     owns no backend behavior; it delegates to the supplied runtime session.
+
+    ``RuntimeSession.events()`` is a *non-draining* cumulative snapshot (see the
+    contract in :mod:`lingtai_sdk.runtime`): every call returns all events so
+    far. To give callers an ergonomic *incremental* view — read the new events,
+    then read again and see only what arrived since — this facade keeps its own
+    read cursor and returns the snapshot tail past it. The underlying session is
+    never mutated, so advanced callers can still reach the full snapshot via
+    :attr:`raw_session`.
     """
 
     def __init__(self, session: RuntimeSession) -> None:
         self._session = session
         self._closed = False
+        #: How many snapshot events have already been handed to this facade's
+        #: caller via :meth:`events`. Advances the cursor so each read yields
+        #: only the events appended since the previous read.
+        self._cursor = 0
 
     @property
     def raw_session(self) -> RuntimeSession:
@@ -118,9 +130,18 @@ class LingTaiSession:
         return self
 
     def events(self) -> tuple[RuntimeEvent, ...]:
-        """Return the currently available runtime events as a tuple."""
+        """Return runtime events appended since the previous read.
 
-        return tuple(self._session.events())
+        The underlying ``RuntimeSession.events()`` is a cumulative snapshot;
+        this facade advances an internal cursor so repeated calls yield only the
+        newly-arrived events (an incremental, drain-like view) without mutating
+        the session. Use :attr:`raw_session` for the full snapshot.
+        """
+
+        snapshot = tuple(self._session.events())
+        fresh = snapshot[self._cursor :]
+        self._cursor = len(snapshot)
+        return fresh
 
     def text(self) -> str:
         """Drain currently available events and concatenate only TEXT chunks.
@@ -209,7 +230,6 @@ class LingTaiClient:
             )
 
         session = self.runtime.create_session(runtime_options)
-        events: list[RuntimeEvent] = []
         started = False
         try:
             session.start()
@@ -219,13 +239,19 @@ class LingTaiClient:
                     message, sender=sender, subject=subject, metadata=metadata
                 )
             )
-            events.extend(session.events())
         finally:
             if stop and started:
                 session.stop()
-                events.extend(session.events())
 
-        return QueryResult(text=_collect_text(events), events=tuple(events))
+        # ``RuntimeSession.events()`` is a non-draining cumulative snapshot (see
+        # the contract in ``runtime.py``): every call returns *all* events so
+        # far. So we read it exactly once, after the lifecycle is settled — the
+        # final snapshot already includes start, send, and (when stopped) stop
+        # events. Reading it mid-flow and again after stop would double-count
+        # the early events against a real (snapshot) runtime session.
+        events = tuple(session.events()) if started else ()
+
+        return QueryResult(text=_collect_text(events), events=events)
 
 
 def open_session(

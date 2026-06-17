@@ -129,7 +129,24 @@ class RuntimeEvent:
 
 
 class RuntimeSession(ABC):
-    """A single live agent session: send messages in, iterate events out."""
+    """A single live agent session: send messages in, iterate events out.
+
+    **Event semantics (the ``events()`` contract).** ``events()`` returns a
+    *non-draining, re-iterable cumulative snapshot*: every call yields **all**
+    events the session has emitted so far, in order, and reading them does not
+    consume or clear them. Two back-to-back calls with no intervening activity
+    therefore return equal sequences. A backend MUST NOT drain on read — callers
+    that want an incremental "only what's new" view track their own cursor over
+    the snapshot (see :class:`lingtai_sdk.client.LingTaiSession`). This is what
+    keeps a single ``events()`` read after ``stop()`` complete and free of
+    double counting; a draining implementation silently breaks
+    :meth:`lingtai_sdk.client.LingTaiClient.query`.
+
+    **State events.** State transitions are surfaced as ``EventKind.STATE``
+    events whose ``data['state']`` is a :class:`RuntimeState` *value* (a plain
+    string). Backends map their own life-state onto :class:`RuntimeState` so the
+    taxonomy stays backend-neutral.
+    """
 
     source: str = ""
 
@@ -148,7 +165,13 @@ class RuntimeSession(ABC):
     def send(self, message: "RuntimeMessage | str") -> None: ...
 
     @abstractmethod
-    def events(self) -> Iterator[RuntimeEvent]: ...
+    def events(self) -> Iterator[RuntimeEvent]:
+        """Return a non-draining cumulative snapshot of all events so far.
+
+        See the class docstring: re-iterable, never consumes, ordered. Backends
+        that drain on read violate the contract and break ``query()``.
+        """
+        ...
 
     @abstractmethod
     def stop(self, timeout: float = 5.0) -> None: ...
