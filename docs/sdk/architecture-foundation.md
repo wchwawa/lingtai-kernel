@@ -139,7 +139,40 @@ read-only `echo` bundle that exercises the schema end to end at the lowest
 possible risk. **Core bundles (`system` / `psyche` / `soul`) are deliberately
 not migrated in this PR.**
 
-## 7. Staged roadmap
+
+## 7. Top-level assets and `lingtai-sdk-skill`
+
+The CapabilityBundle model does **not** require abandoning top-level SDK assets.
+Instead, the long-term direction is that a top-level **`lingtai-sdk-skill`** can
+act as a superset and observation entrypoint for those assets:
+
+- it can contain the system-prompt templates and reusable prompt fragments that
+  used to look like standalone top-level assets;
+- it can use the familiar skill layout (`SKILL.md`, `reference/`, `scripts/`,
+  `templates/`, examples) so other coding agents can inspect LingTai's operating
+  model without importing the runtime;
+- the CLI/backend assembly layer decides which templates from that skill are
+  loaded for a specific runtime/profile;
+- CapabilityBundles may point at skill/manual assets, but they do not force every
+  asset to live inside each bundle.
+
+So the relationship is:
+
+```text
+lingtai-sdk-skill/        # top-level skill-shaped asset superset and observer entry
+  SKILL.md
+  reference/
+  templates/             # system prompt templates, covenant/procedures/substrate fragments
+  scripts/
+
+CapabilityBundle.manual  # per-capability manual/asset pointer into skill-shaped layouts
+```
+
+This preserves the usefulness of top-level assets while still giving the SDK a
+single, skill-shaped semantic container for manuals, templates, and coding-agent
+observation.
+
+## 8. Staged roadmap
 
 This PR is **stage 0: the foundation.** Each later stage is its own reviewable
 PR, sequenced so contracts stabilize before implementations depend on them.
@@ -171,7 +204,7 @@ PR, sequenced so contracts stabilize before implementations depend on them.
 - Changes to the CLI or to existing `lingtai` / `lingtai_kernel` runtime
   behavior.
 
-## 8. Files
+## 9. Files
 
 ```
 src/lingtai_sdk/

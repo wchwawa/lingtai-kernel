@@ -114,7 +114,25 @@ worktree; `PYTHONPATH=src` pins imports to this worktree's source).
 
 The 3 skips are pre-existing and unrelated to this change. No new failures.
 
-## 5. Risks
+
+## 5. Jason clarification: top-level assets and `lingtai-sdk-skill`
+
+After the initial implementation pass, Jason clarified that the design should not
+be read as abandoning top-level assets. The intended direction is that a top-level
+`lingtai-sdk-skill` can replace/superset top-level assets: it holds system prompt
+templates and related reusable prompt fragments while also serving as an
+observation entrypoint for other coding agents.
+
+This has been reflected in `docs/sdk/architecture-foundation.md`. In practical
+terms:
+
+- `CapabilityBundle.manual` points at skill/manual layouts;
+- per-capability manuals/assets can stay local to each bundle;
+- top-level SDK-wide templates can live in a future `lingtai-sdk-skill/` with
+  `SKILL.md`, `reference/`, `templates/`, and `scripts/`;
+- CLI/backend assembly chooses which templates to load for a runtime/profile.
+
+## 6. Risks
 
 - **Low.** The package is additive and import-light; nothing existing is
   modified, and the full suite is green.
@@ -131,7 +149,7 @@ The 3 skips are pre-existing and unrelated to this change. No new failures.
   trade-off is that their ergonomics are only validated by tests + the proof
   bundle, not by a real runtime. That validation is staged (roadmap 1–3).
 
-## 6. Intentionally left for later
+## 7. Intentionally left for later
 
 - A live `NativeRuntime` (thin `Runtime`/`RuntimeSession` over the existing
   `Agent`, no kernel turn-loop changes). Roadmap stage 1.
@@ -144,7 +162,7 @@ The 3 skips are pre-existing and unrelated to this change. No new failures.
 - A `lingtai-sdk-doctor`-style audit that scans a consumer's imports and prints
   the recommended move from `_compat.DEPRECATIONS` (nice-to-have).
 
-## 7. PR title / body draft
+## 8. PR title / body draft
 
 **Title:** `feat(sdk): architecture foundation — lingtai_sdk public doorway + contract seeds`
 
@@ -185,7 +203,7 @@ The 3 skips are pre-existing and unrelated to this change. No new failures.
 > - `git diff --check` clean; packaging auto-discovers `lingtai_sdk` (no
 >   `pyproject.toml` change).
 
-## 8. Notes on running tests
+## 9. Notes on running tests
 
 This worktree has no local `venv`; the system `python` editable-installs
 `lingtai` from a *different* worktree. Always run tests here with
