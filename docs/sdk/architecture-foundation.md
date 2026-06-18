@@ -1103,3 +1103,105 @@ What Stage 14 deliberately is **not**:
 - no change to the happy-path lifecycle or to event payload shapes beyond the
   added error events;
 - no new retry/backoff policy — rollback only makes a manual retry *possible*.
+
+## 23. Stage 3A — low-state file/query tool bundle template (stacked PR)
+
+Stage 3A is the first **low-risk, real low-state tool** adoption of the
+capability-bundle pattern, and the deliberate *template* the remaining low-state
+tool migrations follow. Where stage 8 (§16) declared the privileged core
+(`system` / `psyche` / `soul`) as manifests hosted only by a native authority,
+stage 3A does the non-privileged, in-process equivalent for the three low-state
+file/query tools the wrapper already ships: `read`, `glob`, `grep`.
+
+### The boundary reality (why declare-and-inject, not migrate)
+
+The real `read` / `glob` / `grep` live in the wrapper (`lingtai.core.{read,glob,
+grep}`) and bind to **wrapper-owned services** at `setup()` time —
+`agent._file_io` (the FileIO service, with its path-sandbox and traversal-budget
+semantics) and `agent._working_dir`. Two hard rules forbid lifting that behavior
+into the SDK:
+
+- **the SDK must stay import-pure** — eagerly importing a wrapper service would
+  pull the provider SDKs into `import lingtai_sdk`; and
+- **the kernel must never import the SDK** — so no kernel-side shim can reach
+  back into `lingtai_sdk`.
+
+So stage 3A follows the same shape every prior stage used: the SDK ships a
+**declaration + an injection seam**, and the *wrapper* (which may import the SDK)
+injects the real handlers.
+
+### What it adds
+
+- **`lingtai_sdk.file_tools`** (import-pure) — the SDK-side template. It declares
+  `read_bundle()` / `glob_bundle()` / `grep_bundle()` as non-privileged,
+  freely `REPLACEABLE`, `in_process`, read-only (`SecurityDanger.SAFE`)
+  `BundleManifest`s, each declaring exactly its one public tool and carrying a
+  language-neutral copy of the tool's argument schema in metadata. The host seam
+  `file_tool_host(manifest, handler)` / `file_tool_hosts(handlers)` wires an
+  *injected* handler per tool through the non-native
+  `capability_host.BundleHost` (the non-privileged mirror of stage 8's
+  `native_core_host` / `native_core_hosts`), enforcing the same
+  manifest↔handler parity. It imports no wrapper and calls no real file tool.
+- **A single source of truth for handler behavior.** `lingtai.core.{read,glob,
+  grep}` now each expose a `make_handler(agent)` factory; their `setup()` wires
+  *that same* closure via `agent.add_tool(...)`. The tool schema and the
+  registered behavior are byte-for-byte unchanged — `setup()` remains the live
+  registration path.
+- **`lingtai.core.file_bundle`** (wrapper-side bridge) — injects the real
+  `make_handler(agent)` closures into `file_tool_hosts(...)` and returns
+  `{name: BundleHost}`. `host.invoke("read", file_path=...)` then runs the real
+  file-tool logic through the declared manifest, proving the bundle-execution
+  pattern against actual behavior. A tiny kwargs adapter reconciles the wrapper
+  handler's `args: dict` contract with `BundleHost.invoke`'s keyword args. The
+  import direction stays one-way (`wrapper → sdk`).
+
+### The adoption path
+
+```
+declared manifest (read/glob/grep, lingtai_sdk.file_tools)
+   -> lingtai.core.file_bundle.file_tool_bundle_hosts(agent)   # wrapper injects real make_handler(agent)
+   -> file_tool_hosts({name: handler})                          # SDK host seam (BundleHost)
+   -> host.invoke(name, **args)                                 # runs the wrapper's existing logic, unchanged
+```
+
+### What it deliberately is NOT
+
+- It does **not** migrate, move, rewrite, import, or call the real `read` /
+  `glob` / `grep` *from the SDK*; the implementations stay in the wrapper, bound
+  to `agent._file_io` / `agent._working_dir`, with their path-sandbox /
+  traversal-budget / error-structure semantics intact.
+- It does **not** change the agent's live tool registration or dispatch —
+  `setup()` is untouched as the live path; the bundle host is an additive,
+  observable seam.
+- It does **not** touch high-state tools (`system` / `email` / `daemon` / `mcp`),
+  the kernel turn loop, the wrapper `Agent`, providers, or distribution/package
+  naming.
+
+### Import purity
+
+`lingtai_sdk.file_tools` imports only the import-pure `.capabilities` /
+`.capability_host` / `.errors` siblings; a bare `import lingtai_sdk.file_tools`
+pulls in no `lingtai` wrapper module (asserted by
+`tests/test_sdk_file_tools.py::test_file_tools_import_is_pure_and_migrates_nothing`).
+The wrapper bridge imports the SDK, never the reverse.
+
+### Tested without a model
+
+`tests/test_sdk_file_tools.py` exercises the SDK declarations + host seam with
+dummy handlers and the purity subprocess (no API key, no agent). The
+*end-to-end* proof against the real behavior is
+`tests/test_file_bundle_bridge.py`: it builds an `Agent` with a mock LLM
+service, writes real files, and asserts that invoking each tool through the
+bundle host returns exactly what the agent's registered handler returns
+(parity), and that error structures (missing file, missing pattern) and the
+relative-path / working-dir resolution are preserved through the bundle path.
+
+### Roadmap note
+
+This is the low-state half of the capability-bundle migration that complements
+the deferred privileged-core work (§16): the non-privileged file/query tools are
+now declared and hosted through the same boundary, with the wrapper bridge
+proving the execution pattern against real behavior. The remaining low-state
+tools (`write` / `edit` and other read-only/query surfaces) can follow this
+exact template; the high-state tools (`system` / `email` / `daemon` / `mcp`) and
+any live wiring into the turn loop remain later, higher-risk PRs.
