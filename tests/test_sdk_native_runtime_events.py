@@ -167,6 +167,49 @@ def test_agent_state_change_surfaces_as_state_event(tmp_path):
     assert "asleep" in values
 
 
+def test_agent_state_maps_through_runtime_taxonomy(tmp_path):
+    """A sampled agent state is mapped onto a ``RuntimeState`` *value*.
+
+    The contract (``runtime.py``) says ``STATE`` event ``data['state']`` is a
+    ``RuntimeState`` value, so the native session maps the agent's own life-state
+    rather than passing an arbitrary string through. Each of the wrapper
+    ``AgentState`` values has a same-named ``RuntimeState``.
+    """
+    session = _active_session(tmp_path)
+    agent = session.agent
+    for raw in ("idle", "stuck", "asleep", "suspended"):
+        agent._state = raw
+        states = [
+            e.data["state"]
+            for e in session.events()
+            if e.kind is rt.EventKind.STATE
+        ]
+        assert raw in states
+        # Every emitted state value is a valid RuntimeState value.
+        assert all(v in {s.value for s in rt.RuntimeState} for v in states)
+
+
+def test_unknown_agent_state_maps_to_stuck_not_leaked(tmp_path):
+    """An unrecognized agent life-state must not leak as a raw STATE value.
+
+    The contract guarantees ``data['state']`` is always a ``RuntimeState`` value.
+    A backend that grows a new/unknown life-state string must be coerced into the
+    taxonomy — ``STUCK`` is the abnormal/unknown bucket — rather than surfacing an
+    out-of-taxonomy string to SDK consumers.
+    """
+    session = _active_session(tmp_path)
+    agent = session.agent
+    agent._state = "frobnicating"  # not a RuntimeState value
+    values = [
+        e.data["state"]
+        for e in session.events()
+        if e.kind is rt.EventKind.STATE
+    ]
+    assert "frobnicating" not in values
+    assert rt.RuntimeState.STUCK.value in values
+    assert all(v in {s.value for s in rt.RuntimeState} for v in values)
+
+
 def test_agent_state_no_duplicate_state_events(tmp_path):
     session = _active_session(tmp_path)
     agent = session.agent
