@@ -32,9 +32,14 @@ def get_schema(lang: str = "en") -> dict:
 
 
 
-def setup(agent: "BaseAgent") -> None:
-    """Set up the grep capability on an agent."""
-    lang = agent._config.language
+def make_handler(agent: "BaseAgent"):
+    """Build the ``grep`` tool handler bound to *agent*.
+
+    Single source of truth for the grep behavior: both ``setup()`` and the SDK
+    file-tool bundle bridge (``lingtai.core.file_bundle``) wire this same
+    closure, so the bundle-hosted tool runs byte-identical logic to the
+    registered tool.
+    """
 
     def handle_grep(args: dict) -> dict:
         pattern = args.get("pattern", "")
@@ -85,4 +90,15 @@ def setup(agent: "BaseAgent") -> None:
         except Exception as e:
             return {"status": "error", "message": f"Grep failed: {e}"}
 
-    agent.add_tool("grep", schema=get_schema(lang), handler=handle_grep, description=get_description(lang))
+    return handle_grep
+
+
+def setup(agent: "BaseAgent") -> None:
+    """Set up the grep capability on an agent."""
+    lang = agent._config.language
+    agent.add_tool(
+        "grep",
+        schema=get_schema(lang),
+        handler=make_handler(agent),
+        description=get_description(lang),
+    )
