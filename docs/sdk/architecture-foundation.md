@@ -1386,7 +1386,7 @@ stage must not do. The conservative, faithful encoding is therefore:
   conservatively `destructive`.
 
 The grading is a *declaration of* the authority the kernel intrinsic already
-enforces in code (`intrinsics.system.karma._KARMA_ACTIONS` / `_NIRVANA_ACTIONS`),
+enforces in code (`core.system.karma._KARMA_ACTIONS` / `_NIRVANA_ACTIONS`),
 pinned to never drift from it by `tests/test_sdk_lifecycle_tools.py`. It is **never
 a second runtime gate**: no guard is installed and the real karma/nirvana gate
 stays in the kernel intrinsic.

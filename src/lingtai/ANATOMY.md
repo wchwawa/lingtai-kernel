@@ -45,7 +45,7 @@ PyPI wrapper package — `Agent(BaseAgent)` with composable capabilities, preset
 
 **Inbound:** `lingtai-tui` calls `cli.run()` to boot agents; imports `load_preset`, `discover_presets_in_dirs` for UI. Kernel's `BaseAgent` is the parent class. `lingtai_sdk` may lazily import this wrapper as a public SDK convenience path.
 
-**Outbound — kernel:** `lingtai.kernel.base_agent.BaseAgent`, `.config.AgentConfig`, `.prompt.build_system_prompt`, `.handshake.resolve_address`, `.intrinsics.{email,psyche}`, `.services.mail.FilesystemMailService`, `.migrate.run_migrations` (preset libraries) and `.migrate.run_agent_migrations` (agent workdir/init migrations; see `kernel/migrate/ANATOMY.md`).
+**Outbound — kernel:** `lingtai.kernel.base_agent.BaseAgent`, `.config.AgentConfig`, `.prompt.build_system_prompt`, `.handshake.resolve_address`, `lingtai.core.{email,psyche}` via the lazy `kernel.builtin_tools` registry, `.services.mail.FilesystemMailService`, `.migrate.run_migrations` (preset libraries) and `.migrate.run_agent_migrations` (agent workdir/init migrations; see `kernel/migrate/ANATOMY.md`).
 
 **Cross-module:** `agent.py` → `core.registry.setup_capability`, `core.mcp.{decompress_addons,read_registry,MCPInboxPoller}`, `services.mcp.{MCPClient,HTTPMCPClient}`, `llm.service.LLMService`, `presets`, `lingtai.kernel.config_resolve`, `init_schema`, `guard_wiring.wire_agent_guard`. `cli.py` re-exports `lingtai_cli.host` (the host, which → `agent.Agent`, `lingtai.kernel.config_resolve`, `presets`).
 

@@ -248,7 +248,7 @@ def test_email_publish_writes_file(tmp_path: Path, monkeypatch) -> None:
         return ("3 unread:\n- A\n- B\n- C\n", 3, "2026-05-05T00:00:00Z")
 
     monkeypatch.setattr(
-        "lingtai.core.email.primitives._render_unread_digest",
+        "lingtai.core.email._render_unread_digest",
         fake_render,
     )
 
@@ -271,7 +271,7 @@ def test_email_clear_on_zero(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / ".notification" / "email.json").exists()
 
     monkeypatch.setattr(
-        "lingtai.core.email.primitives._render_unread_digest",
+        "lingtai.core.email._render_unread_digest",
         lambda _agent, **_kw: ("", 0, None),
     )
 
