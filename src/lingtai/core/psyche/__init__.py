@@ -14,7 +14,7 @@ Sub-modules:
 
 Internal:
     boot — boot-time hook: load lingtai + pad into prompt, register post-molt
-        reload. Called from base_agent.__init__ after intrinsics are wired.
+        reload. Called from base_agent.__init__ after built-in tools are wired.
 """
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ from ._molt import _context_molt, _name_set, _name_nickname, context_forget  # n
 
 
 def get_description(lang: str = "en") -> str:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return t(lang, "psyche.description")
 
 
 def get_schema(lang: str = "en") -> dict:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return {
         "type": "object",
         "properties": {
@@ -135,7 +135,7 @@ def handle(agent, args: dict) -> dict:
 
 def boot(agent) -> None:
     """Boot-time hook: load lingtai + pad into the prompt, register post-molt
-    reload. Called from base_agent.__init__ after intrinsics are wired."""
+    reload. Called from base_agent.__init__ after built-in tools are wired."""
     _pad_load(agent, {})
     _lingtai_load(agent, {})
     if not hasattr(agent, "_post_molt_hooks"):

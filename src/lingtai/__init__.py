@@ -36,8 +36,11 @@ from lingtai.kernel.config import AgentConfig
 from lingtai.kernel.base_agent import BaseAgent
 from lingtai.kernel.state import AgentState
 from lingtai.kernel.message import Message, MSG_REQUEST, MSG_USER_INPUT
-# EmailManager is exported by the kernel intrinsic; re-export for backwards compat.
-from lingtai.kernel.intrinsics.email import EmailManager
+# EmailManager is the ``email`` built-in tool's manager, now living in the
+# wrapper at ``lingtai.core.email`` — so it is a LAZY wrapper export (see
+# ``_LAZY_WRAPPER_EXPORTS`` below), not eager: importing it eagerly would pull
+# the ``lingtai.core`` wrapper layer into a bare ``import lingtai`` and break
+# SDK import-purity.
 from lingtai.kernel.services.mail import MailService, FilesystemMailService
 from lingtai.kernel.services.logging import LoggingService, JSONLLoggingService
 
@@ -50,6 +53,7 @@ _LAZY_WRAPPER_EXPORTS: dict[str, tuple[str, str]] = {
     "setup_capability": (".core.registry", "setup_capability"),
     "BashManager": (".core.bash", "BashManager"),
     "AvatarManager": (".core.avatar", "AvatarManager"),
+    "EmailManager": (".core.email", "EmailManager"),
     # services.file_io
     "FileIOBackend": (".services.file_io", "FileIOBackend"),
     "FileIOService": (".services.file_io", "FileIOService"),
@@ -77,6 +81,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .core.registry import setup_capability  # noqa: F401
     from .core.bash import BashManager  # noqa: F401
     from .core.avatar import AvatarManager  # noqa: F401
+    from .core.email import EmailManager  # noqa: F401
     from .services.file_io import (  # noqa: F401
         FileIOBackend,
         FileIOService,

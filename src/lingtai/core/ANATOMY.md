@@ -13,6 +13,7 @@ The always-on agent floor (file I/O, knowledge, skills, daemon, avatar, bash, mc
 | `_zhipu_mode.py` | `resolve_z_ai_mode()` — returns `"ZHIPU"` (bigmodel.cn) or `"ZAI"` (international) |
 | `read/ write/ edit/ glob/ grep/` | File-I/O capabilities (the `file` group) |
 | `knowledge/ skills/ bash/ avatar/ daemon/ mcp/` | The rest of the always-on floor |
+| `email/ system/ psyche/ soul/` | The four always-present **built-in tools** (formerly `lingtai.kernel.intrinsics.*`). Each exposes `get_schema(lang)` / `get_description(lang)` / `handle(agent, args)`. The kernel never imports them eagerly — `lingtai.kernel.builtin_tools` records their module paths as strings and imports `lingtai.core.<tool>` lazily when an agent wires/renders its tool surface, preserving SDK import-purity |
 | `vision/ web_search/` | Opt-in multimodal capabilities (NOT in `CORE_DEFAULTS`; require provider config) |
 | `*_bundle.py` | SDK bundle bridges (see Notes) — `file_bundle`, `system_bundle`, `communication_bundle`, `mcp_bundle`, `knowledge_bundle`, `bash_bundle`, `avatar_bundle`, `psyche_bundle`, `soul_bundle` |
 | `__init__.py` | Import-light docstring only; makes the tier visible in the import graph |

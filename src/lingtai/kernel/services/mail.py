@@ -15,13 +15,11 @@ import logging
 import os
 import shutil
 import threading
-import time
-import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from ..handshake import is_agent, is_alive, manifest, resolve_address
+from ..handshake import is_agent, is_alive, resolve_address
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +160,8 @@ class FilesystemMailService(MailService):
             return f"Agent at {address} is not running"
 
         # --- create inbox entry ---------------------------------------
-        from ..intrinsics.email import _new_mailbox_id
+        from ..builtin_tools import get_builtin_tool_module
+        _new_mailbox_id = get_builtin_tool_module('email')._new_mailbox_id
         msg_id = _new_mailbox_id()
         inbox_dir = recipient_dir / self._mailbox_rel / "inbox"
         msg_dir = inbox_dir / msg_id

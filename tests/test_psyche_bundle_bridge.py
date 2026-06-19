@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from lingtai.kernel.base_agent import BaseAgent
-from lingtai.kernel.intrinsics import psyche as psyintr
+from lingtai.core import psyche as psyintr
 from lingtai.core import psyche_bundle
 
 

@@ -1,4 +1,4 @@
-# intrinsics/email
+# core/email
 
 Filesystem-based email system — mailbox I/O, composition, search, contacts, recurring schedules, and delivery. The agent's primary inter-process communication channel.
 

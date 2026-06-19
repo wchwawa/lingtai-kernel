@@ -10,7 +10,7 @@ Carrier and host class — consistent with the live wiring
 --------------------------------------------------------
 ``bash`` is a **wrapper capability** registered live by its ``setup()`` through
 ``agent.add_tool`` — the *same* non-native, in-process registration path the file
-tools, ``daemon``, ``mcp``, and ``knowledge`` use, **not** a kernel intrinsic. So,
+tools, ``daemon``, ``mcp``, and ``knowledge`` use, **not** a built-in tool. So,
 like ``daemon``, it declares ``in_process`` transport + ``privileged=False`` and is
 hosted by the non-native :class:`~lingtai_sdk.capability_host.BundleHost`,
 mirroring how the live ``setup()`` path carries it. Unlike the read-only catalog

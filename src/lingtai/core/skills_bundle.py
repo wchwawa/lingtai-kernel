@@ -15,7 +15,7 @@ against actual behavior.
 Where the real handler lives — and why the bridge lives here
 ------------------------------------------------------------
 ``skills`` is a **wrapper capability** (like ``knowledge``, ``mcp``, ``daemon``, and
-the file tools), not a kernel intrinsic. Its real handler is the closure
+the file tools), not a built-in tool. Its real handler is the closure
 ``lingtai.core.skills.make_handler(agent, paths)`` builds — the *same* closure
 ``skills.setup()`` registers via ``agent.add_tool`` (single source of truth; see
 ``lingtai.core.skills.make_handler``). The bridge reuses that *same* factory —

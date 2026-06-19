@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from lingtai.kernel.base_agent import BaseAgent
-from lingtai.kernel.intrinsics import email as emailintr
+from lingtai.core import email as emailintr
 from lingtai.core import communication_bundle
 from lingtai.core import daemon as daemonmod
 from lingtai_sdk import communication_tools as ct

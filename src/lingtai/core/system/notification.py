@@ -29,7 +29,7 @@ def _dismiss(agent, args: dict) -> dict:
             "message": "system(action='dismiss') requires channel=<name>.",
         }
 
-    from ...notifications import dismiss_channel
+    from lingtai.kernel.notifications import dismiss_channel
 
     return dismiss_channel(
         agent,

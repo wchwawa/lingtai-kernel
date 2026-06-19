@@ -784,7 +784,7 @@ def test_email_archive_already_archived(tmp_path):
 
 def test_email_schedule_removed_from_schema(tmp_path):
     """The built-in recurring-send scheduler was removed in favor of host cron."""
-    from lingtai.kernel.intrinsics.email import get_schema
+    from lingtai.core.email import get_schema
     schema = get_schema("en")
     assert "schedule" not in schema["properties"]
 
@@ -801,7 +801,7 @@ def test_email_schedule_payload_is_not_routed(tmp_path):
 # _coerce_address_list — normalize LLM-quirky address args to list[str]
 # ---------------------------------------------------------------------------
 
-from lingtai.kernel.intrinsics.email import _coerce_address_list
+from lingtai.core.email import _coerce_address_list
 
 
 def test_coerce_address_list_empty_string():

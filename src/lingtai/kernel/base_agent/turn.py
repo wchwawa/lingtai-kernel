@@ -159,7 +159,8 @@ def _publish_tool_loop_guard_notification(
     workdir = getattr(agent, "_working_dir", None)
     try:
         from pathlib import Path
-        from ..intrinsics.system import publish_notification
+        from ..builtin_tools import get_builtin_tool_module
+        publish_notification = get_builtin_tool_module('system').publish_notification
 
         publish_notification(
             Path(workdir),
@@ -461,7 +462,8 @@ def _restore_tool_results_after_continuation_failure(
 def _run_loop(agent) -> None:
     """Wait for messages, process them. Agent persists between messages."""
     from ..state import AgentState
-    from ..intrinsics.soul.flow import _cancel_soul_timer
+    from ..builtin_tools import get_builtin_tool_module
+    _cancel_soul_timer = get_builtin_tool_module('soul')._cancel_soul_timer
 
     while True:
         while not agent._shutdown.is_set():
@@ -711,7 +713,8 @@ def _run_loop(agent) -> None:
                 if agent._insight_turn_counter >= agent._config.insights_interval:
                     agent._insight_turn_counter = 0
                     from ..i18n import t as _ti
-                    from ..intrinsics.soul.inquiry import _run_inquiry
+                    from ..builtin_tools import get_builtin_tool_module
+                    _run_inquiry = get_builtin_tool_module('soul')._run_inquiry
                     _run_inquiry(
                         agent,
                         _ti(agent._config.language, "insight.auto_question"),
@@ -832,7 +835,8 @@ def _check_molt_pressure(agent) -> None:
     pressure = agent._session.get_context_pressure()
 
     if pressure < agent._config.molt_pressure:
-        from ..intrinsics.system import clear_notification
+        from ..builtin_tools import get_builtin_tool_module
+        clear_notification = get_builtin_tool_module('system').clear_notification
         clear_notification(agent._working_dir, "molt")
         return
 
@@ -847,7 +851,8 @@ def _check_molt_pressure(agent) -> None:
         else f"context {pressure:.0%} — consider molt"
     )
     icon = "🚨" if urgent else "⚠️"
-    from ..intrinsics.system import publish_notification
+    from ..builtin_tools import get_builtin_tool_module
+    publish_notification = get_builtin_tool_module('system').publish_notification
     publish_notification(
         agent._working_dir, "molt",
         header=header,

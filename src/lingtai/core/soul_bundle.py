@@ -11,8 +11,8 @@ actual behavior.
 
 Where the real handler lives — and why the bridge lives here
 ------------------------------------------------------------
-Exactly like ``system`` / ``psyche``, ``soul`` is a **kernel intrinsic**:
-``lingtai.kernel.intrinsics.soul.handle(agent, args)``. The kernel wires it live
+Exactly like ``system`` / ``psyche``, ``soul`` is a **built-in tool**:
+``lingtai.core.soul.handle(agent, args)``. The kernel wires it live
 in ``BaseAgent._wire_intrinsics`` as ``self._intrinsics["soul"] =
 lambda args: soul.handle(self, args)`` — that closure is the live registration
 path, and it is **left untouched** by this stage.
@@ -23,12 +23,12 @@ intrinsic the kernel dispatches, against the same ``agent`` state (the
 ``_soul_fire_lock`` fire gate, ``_soul_delay`` cadence, the consultation pipeline,
 ``logs/`` ledgers, and the ``.notification/soul.json`` surface). The bridge lives
 in the wrapper — not the kernel — because the dependency direction is one-way: the
-wrapper *may* import the SDK (``lingtai_sdk.soul_tools``) and the kernel intrinsic;
+wrapper *may* import the SDK (``lingtai_sdk.soul_tools``) and the built-in tool;
 the **kernel must never import the SDK**. Putting the SDK import here (lazily,
 inside the bridge functions) preserves that.
 
 The wrapper bundle host (``NativeBundleHost``) invokes its handler with keyword
-args; the kernel intrinsic ``handle`` takes a single ``args: dict``. The tiny
+args; the built-in tool ``handle`` takes a single ``args: dict``. The tiny
 ``_kwargs_adapter`` reconciles the two without changing either contract — the
 identical adapter ``system_bundle`` / ``psyche_bundle`` use.
 
@@ -51,21 +51,21 @@ if TYPE_CHECKING:
     from lingtai.kernel.base_agent import BaseAgent
     from lingtai_sdk.bundles.host import NativeBundleHost
 
-# The single source of truth for ``soul`` behavior — the kernel intrinsic the live
+# The single source of truth for ``soul`` behavior — the built-in tool the live
 # ``_wire_intrinsics`` path also dispatches. Imported at wrapper module load (the
-# wrapper may import the kernel intrinsic surface); the SDK is imported lazily
+# wrapper may import the built-in tool surface); the SDK is imported lazily
 # inside the bridge functions to preserve the wrapper→sdk import edge.
-from lingtai.kernel.intrinsics import soul as _soul
+import lingtai.core.soul as _soul
 
 
 def _kwargs_adapter(
     handler: Callable[["BaseAgent", dict], Any],
     agent: "BaseAgent",
 ) -> Callable[..., Any]:
-    """Adapt the kernel intrinsic ``handle(agent, args)`` to host kwargs invocation.
+    """Adapt the built-in tool ``handle(agent, args)`` to host kwargs invocation.
 
     ``NativeBundleHost.invoke(tool, **kwargs)`` calls its handler with keyword
-    args, but the kernel intrinsic ``soul.handle`` takes ``(agent, args: dict)``.
+    args, but the built-in tool ``soul.handle`` takes ``(agent, args: dict)``.
     This binds *agent* and collects the kwargs back into the ``args`` dict so the
     real intrinsic runs unchanged — the inner-voice mirror of the adapter
     ``lingtai.core.system_bundle`` uses for the system handler.
@@ -80,7 +80,7 @@ def _kwargs_adapter(
 def soul_voice_handler(agent: "BaseAgent") -> Callable[..., Any]:
     """Build the kwargs-handler the SDK ``soul`` host seam expects.
 
-    The handler is the kernel intrinsic ``soul.handle`` — the *same* function
+    The handler is the built-in tool ``soul.handle`` — the *same* function
     ``BaseAgent._wire_intrinsics`` wires live — bound to *agent* and adapted to the
     host's keyword-args invocation contract. Bound to *agent*, so it reads through
     ``agent._soul_fire_lock`` / ``agent._soul_delay`` and the consultation pipeline
@@ -94,7 +94,7 @@ def soul_voice_bundle_host(agent: "BaseAgent") -> "NativeBundleHost":
 
     Returns a single :class:`~lingtai_sdk.capability_host.NativeBundleHost` for
     ``soul``, hosting the bundle's one declared tool with the wrapper's genuine
-    handler (the kernel intrinsic, bound to *agent*). The SDK is imported here, in
+    handler (the built-in tool, bound to *agent*). The SDK is imported here, in
     the wrapper, not at SDK module load — preserving the one-way ``wrapper -> sdk``
     direction.
 
@@ -104,7 +104,7 @@ def soul_voice_bundle_host(agent: "BaseAgent") -> "NativeBundleHost":
     live intrinsic registration. The declared danger posture (bundle-level
     ``caution`` plus the per-action ``SOUL_ACTION_RISK`` grading) is a declaration
     only: the host runs the handler unconditionally; the real ``flow`` in-flight
-    gate is the kernel intrinsic's ``agent._soul_fire_lock``, and danger-based
+    gate is the built-in tool's ``agent._soul_fire_lock``, and danger-based
     gating is the stage-17 guard bridge's job, neither installed here.
     """
     from lingtai_sdk.bundles.soul_tools import soul_voice_host

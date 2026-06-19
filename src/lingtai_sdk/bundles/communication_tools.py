@@ -6,8 +6,8 @@ seam for the privileged, native-only ``system`` lifecycle surface, this module i
 the seam for the next two high-state surfaces — the ones with **external or
 process side effects**:
 
-* ``email`` — the agent's communication surface. A **kernel intrinsic**
-  (``lingtai.kernel.intrinsics.email.handle``), wired live by
+* ``email`` — the agent's communication surface. A **built-in tool**
+  (``lingtai.core.email.handle``), wired live by
   ``BaseAgent._wire_intrinsics`` exactly like ``system``. It can send mail to
   *external* SMTP/IMAP recipients (a real outside-world side effect) as well as
   deliver internally between agents. Native-carried and privileged (it touches
@@ -56,9 +56,9 @@ What this module is NOT
 -----------------------
 Exactly as in stages 3A/3B/3C, it does **not** migrate, move, rewrite, import, or
 call the real ``email`` / ``daemon`` implementations. The real ``email`` handler
-is a *kernel intrinsic*; the real ``daemon`` handler is a wrapper
+is a *built-in tool*; the real ``daemon`` handler is a wrapper
 ``DaemonManager`` method built at ``setup()``. Importing either here would break
-SDK import-purity (the SDK must not eagerly pull the kernel intrinsic surface or
+SDK import-purity (the SDK must not eagerly pull the built-in tool surface or
 a wrapper service) and is unnecessary — this module ships *declarations + an
 injection seam* only:
 
@@ -68,8 +68,8 @@ injection seam* only:
 
 The wrapper-side bridge that supplies those handlers lives in
 ``lingtai.core.communication_bundle`` (the wrapper *may* import the SDK and the
-kernel intrinsic; the SDK must not import either). The tool **schemas and
-behavior are unchanged**: the bridge reuses the kernel intrinsic's ``handle`` and
+built-in tool; the SDK must not import either). The tool **schemas and
+behavior are unchanged**: the bridge reuses the built-in tool's ``handle`` and
 the wrapper capability's ``make_handler`` verbatim, and the live registration
 paths are untouched.
 
@@ -103,10 +103,10 @@ DAEMON_TOOL_NAME = "daemon"
 # --- declared argument schemas (structural copies, descriptions i18n'd live) --
 
 # Language-neutral copy of the shape returned by
-# ``lingtai.kernel.intrinsics.email.schema.get_schema``. The wrapper's own
+# ``lingtai.core.email.schema.get_schema``. The wrapper's own
 # ``get_schema(lang)`` remains the registration path; this copy lives in the
 # manifest metadata so a host inspecting the manifest can see the argument
-# contract without importing the kernel intrinsic. Descriptions are i18n'd at
+# contract without importing the built-in tool. Descriptions are i18n'd at
 # registration time and intentionally omitted here.
 _EMAIL_ACTIONS: tuple[str, ...] = (
     "send",
@@ -360,7 +360,7 @@ def email_comm_manifest() -> BundleManifest:
     service), but not ``native_only``. The bundle-level posture is
     ``destructive`` — the strongest action's grade (``delete``); the finer
     per-action grading lives in :data:`EMAIL_ACTION_RISK`. **Manifest only** —
-    the real handler (the kernel intrinsic ``email.handle`` bound to an agent) is
+    the real handler (the built-in tool ``email.handle`` bound to an agent) is
     injected by the wrapper bridge.
     """
     return _comm_native_manifest(
@@ -450,10 +450,10 @@ def email_comm_host(handler: ToolHandler) -> NativeBundleHost:
 
     The communication mirror of
     :func:`~lingtai_sdk.lifecycle_tools.system_lifecycle_host`: ``email`` is a
-    native-carried kernel intrinsic, so its host is a
+    native-carried built-in tool, so its host is a
     :class:`~lingtai_sdk.capability_host.NativeBundleHost` built with
     ``native_authority=True``. Given the single *supplied* ``email`` handler
-    callable (the real kernel intrinsic ``email.handle`` bound to an agent, which
+    callable (the real built-in tool ``email.handle`` bound to an agent, which
     the wrapper bridge injects), returns a host of the one declared ``email``
     tool. This shim never imports or calls the real implementation.
 

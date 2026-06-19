@@ -193,7 +193,7 @@ def test_mail_inbox_wiring(tmp_path):
     from lingtai.kernel.notifications import collect_notifications
 
     agent = BaseAgent(service=make_mock_service(), agent_name="receiver", working_dir=tmp_path / "test")
-    from lingtai.kernel.intrinsics.email.primitives import _persist_to_inbox
+    from lingtai.core.email.primitives import _persist_to_inbox
     msg_id = _persist_to_inbox(agent, {
         "from": "127.0.0.1:9999",
         "to": "127.0.0.1:8301",
@@ -280,7 +280,7 @@ def test_mail_received_full_content_in_notification(tmp_path):
     from lingtai.kernel.notifications import collect_notifications
 
     agent = BaseAgent(service=make_mock_service(), agent_name="test", working_dir=tmp_path / "test")
-    from lingtai.kernel.intrinsics.email.primitives import _persist_to_inbox
+    from lingtai.core.email.primitives import _persist_to_inbox
     _persist_to_inbox(agent, {
         "from": "sender",
         "subject": "test subject",

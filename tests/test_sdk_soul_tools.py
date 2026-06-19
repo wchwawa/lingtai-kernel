@@ -46,7 +46,7 @@ from lingtai.kernel.tool_call_guard import ToolProposal
 
 # The real kernel intrinsic schema — the source the SDK action table mirrors.
 # Importing the kernel intrinsic here is allowed (kernel, not wrapper).
-from lingtai.kernel.intrinsics import soul as _soul
+from lingtai.core import soul as _soul
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"

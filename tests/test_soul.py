@@ -1,4 +1,4 @@
-"""Tests for lingtai.kernel.intrinsics.soul.
+"""Tests for lingtai.core.soul.
 
 After the past-self-consultation refactor, this file covers only:
 - The agent-callable surface (``handle``): inquiry action, flow rejection,
@@ -20,7 +20,7 @@ import time
 from unittest.mock import MagicMock
 
 from lingtai.kernel.config import AgentConfig
-from lingtai.kernel.intrinsics import soul
+from lingtai.core import soul
 
 
 def _make_mock_agent():
@@ -102,7 +102,7 @@ class TestSoulHandle:
             fire_called.set()
 
         monkeypatch.setattr(
-            "lingtai.kernel.intrinsics.soul.flow._run_consultation_fire",
+            "lingtai.core.soul.flow._run_consultation_fire",
             tracking_fire,
         )
 
@@ -131,7 +131,7 @@ class TestSoulHandle:
             fire_called.set()
 
         monkeypatch.setattr(
-            "lingtai.kernel.intrinsics.soul.flow._run_consultation_fire",
+            "lingtai.core.soul.flow._run_consultation_fire",
             tracking_fire,
         )
 
@@ -292,14 +292,14 @@ class TestSoulFireAllowed:
     """_soul_fire_allowed compares by string value, not enum identity."""
 
     def test_allows_idle_state(self):
-        from lingtai.kernel.intrinsics.soul.flow import _soul_fire_allowed
+        from lingtai.core.soul.flow import _soul_fire_allowed
         from lingtai.kernel.state import AgentState
         agent = MagicMock()
         agent._state = AgentState.IDLE
         assert _soul_fire_allowed(agent) is True
 
     def test_rejects_active_state(self):
-        from lingtai.kernel.intrinsics.soul.flow import _soul_fire_allowed
+        from lingtai.core.soul.flow import _soul_fire_allowed
         from lingtai.kernel.state import AgentState
         agent = MagicMock()
         agent._state = AgentState.ACTIVE
@@ -309,7 +309,7 @@ class TestSoulFireAllowed:
         """Simulates stale-enum mismatch: a different Enum class whose
         .value is 'idle' should still be accepted."""
         import enum
-        from lingtai.kernel.intrinsics.soul.flow import _soul_fire_allowed
+        from lingtai.core.soul.flow import _soul_fire_allowed
 
         class ForeignState(enum.Enum):
             IDLE = "idle"
@@ -320,7 +320,7 @@ class TestSoulFireAllowed:
 
     def test_rejects_foreign_enum_with_active_value(self):
         import enum
-        from lingtai.kernel.intrinsics.soul.flow import _soul_fire_allowed
+        from lingtai.core.soul.flow import _soul_fire_allowed
 
         class ForeignState(enum.Enum):
             ACTIVE = "active"
@@ -338,7 +338,7 @@ def test_consultation_fire_discards_late_result_after_state_change(monkeypatch):
     transitions the agent to STUCK mid-flight — the post-batch state
     check must discard the result.
     """
-    from lingtai.kernel.intrinsics.soul import flow
+    from lingtai.core.soul import flow
     from lingtai.kernel.llm.interface import TextBlock
     from lingtai.kernel.state import AgentState
 
@@ -358,15 +358,15 @@ def test_consultation_fire_discards_late_result_after_state_change(monkeypatch):
         return [{"source": "insights", "blocks": [TextBlock(text="late")]}]
 
     monkeypatch.setattr(
-        "lingtai.kernel.intrinsics.soul.consultation._render_current_diary",
+        "lingtai.core.soul.consultation._render_current_diary",
         lambda _agent: "diary",
     )
     monkeypatch.setattr(
-        "lingtai.kernel.intrinsics.soul.consultation._run_consultation_batch",
+        "lingtai.core.soul.consultation._run_consultation_batch",
         fake_batch,
     )
     monkeypatch.setattr(
-        "lingtai.kernel.intrinsics.soul.consultation.build_consultation_pair",
+        "lingtai.core.soul.consultation.build_consultation_pair",
         MagicMock(),
     )
 

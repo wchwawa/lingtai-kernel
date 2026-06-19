@@ -368,11 +368,10 @@ class Agent(BaseAgent):
         """Refresh the 'tools' section — wrapper override includes MCP schemas."""
         lang = self._config.language
         lines = []
-        from lingtai.kernel.intrinsics import ALL_INTRINSICS
+        from lingtai.kernel.builtin_tools import get_builtin_tool_module
         for name in self._intrinsics:
-            info = ALL_INTRINSICS.get(name)
-            if info:
-                lines.append(f"### {name}\n{info['module'].get_description(lang)}")
+            module = get_builtin_tool_module(name)
+            lines.append(f"### {name}\n{module.get_description(lang)}")
         for s in self._tool_schemas:
             if s.description:
                 lines.append(f"### {s.name}\n{s.description}")
@@ -1214,7 +1213,7 @@ class Agent(BaseAgent):
         # `_reload_prompt_sections` now route through the same canonical
         # composers (`_lingtai_load`, `_pad_load`), so they produce identical
         # content and the result is independent of which runs last.
-        from lingtai.kernel.intrinsics import psyche as _psyche
+        import lingtai.core.psyche as _psyche
         _psyche.boot(self)
 
         # Re-boot email so a fresh EmailManager + scheduler thread are wired.
@@ -1222,7 +1221,7 @@ class Agent(BaseAgent):
         # starting a new one — without that, the prior daemon thread keeps
         # polling ``mailbox/schedules/*/schedule.json`` and races the new
         # thread, double-sending the same due tick (issue #154).
-        from lingtai.kernel.intrinsics import email as _email
+        import lingtai.core.email as _email
         _email.boot(self)
 
         # Decompress addons BEFORE capability setup so the `mcp` capability
@@ -1352,7 +1351,7 @@ class Agent(BaseAgent):
         # produce byte-identical `character` content and no longer depend on
         # post-molt hook ordering. Distinct from `covenant` above and from the
         # mechanical `identity` section written by BaseAgent.
-        from lingtai.kernel.intrinsics.psyche import _lingtai_load
+        from lingtai.core.psyche import _lingtai_load
         _lingtai_load(self, {})
 
         # --- Substrate (kernel-owned, cross-app stable; #39) ---
@@ -1407,7 +1406,7 @@ class Agent(BaseAgent):
         # Delegate to the single canonical composer rather than re-reading
         # pad.md alone — otherwise the post-molt hook ordering silently drops
         # the pinned append references. `_pad_load` composes both.
-        from lingtai.kernel.intrinsics.psyche import _pad_load
+        from lingtai.core.psyche import _pad_load
         _pad_load(self, {})
 
         # --- Principle ---

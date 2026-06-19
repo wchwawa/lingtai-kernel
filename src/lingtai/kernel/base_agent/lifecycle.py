@@ -28,7 +28,10 @@ def _active_stuck_threshold_s() -> float:
 
 def _start(agent) -> None:
     """Start the agent's main loop thread."""
-    from ..intrinsics.soul.flow import _start_soul_timer, _rehydrate_appendix_tracking
+    from ..builtin_tools import get_builtin_tool_module
+    _soul = get_builtin_tool_module('soul')
+    _start_soul_timer = _soul._start_soul_timer
+    _rehydrate_appendix_tracking = _soul._rehydrate_appendix_tracking
     from ..token_ledger import sum_token_ledger
 
     agent._sealed = True
@@ -110,7 +113,8 @@ def _stop(agent, timeout: float = 5.0) -> None:
     keep this interpreter visible in `ps` after heartbeat/lock are gone, which
     makes refresh watchers race the duplicate-process guard.
     """
-    from ..intrinsics.soul.flow import _cancel_soul_timer
+    from ..builtin_tools import get_builtin_tool_module
+    _cancel_soul_timer = get_builtin_tool_module('soul')._cancel_soul_timer
 
     agent._log("agent_stop")
     _cancel_soul_timer(agent)
@@ -212,7 +216,8 @@ def _heartbeat_loop(agent) -> None:
     don't reprocess `.suspend`/`.refresh` mid-teardown.
     """
     from ..state import AgentState
-    from ..intrinsics.soul.inquiry import _run_inquiry
+    from ..builtin_tools import get_builtin_tool_module
+    _run_inquiry = get_builtin_tool_module('soul')._run_inquiry
 
     while agent._heartbeat_thread is not None:
         # time.time() (wall clock), not time.monotonic(). Deliberate:
@@ -312,7 +317,8 @@ def _heartbeat_loop(agent) -> None:
             except OSError:
                 pass
             try:
-                from ..intrinsics import psyche as _psyche
+                from ..builtin_tools import get_builtin_tool_module
+                _psyche = get_builtin_tool_module('psyche')
                 _psyche.context_forget(agent, source=source)
                 agent._log("clear_received", source=source)
             except Exception as clear_err:

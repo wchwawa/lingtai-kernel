@@ -22,7 +22,7 @@ there is exactly one ``psyche`` manifest in the SDK, and adds two things on top:
    grades each ``psyche`` ``(object, action)`` pair individually. Unlike
    ``system`` (a flat ``action`` discriminator), the live ``psyche`` tool
    dispatches on an ``(object, action)`` pair (see
-   ``lingtai.kernel.intrinsics.psyche._VALID_ACTIONS`` / ``_DISPATCH``), so the
+   ``lingtai.core.psyche._VALID_ACTIONS`` / ``_DISPATCH``), so the
    table is keyed by that pair. A single bundle-level ``caution`` posture cannot
    faithfully express that ``pad.load`` / ``lingtai.load`` are pure reads while
    ``name.set`` writes the **immutable** true name (set-once, irreversible);
@@ -41,7 +41,7 @@ faithful encoding is therefore: set the **bundle-level posture to ``destructive`
 (the strongest per-pair grade, mirroring the other stage-3 bundle posture rule),
 and ship the **graded pair table as metadata** so a host that wants finer-than-
 bundle grading can read it *without* any live runtime gate. The grading mirrors the
-side effects the real kernel intrinsic already performs in code; it is a
+side effects the real built-in tool already performs in code; it is a
 *declaration of* that posture, never a second gate.
 
 Note the table grades the one **irreversible** pair ``name.set`` ``DESTRUCTIVE``;
@@ -55,7 +55,7 @@ What this module is NOT
 -----------------------
 Exactly as in stages 3A/3B/3C/8, it does **not** migrate, move, rewrite, import,
 or call the real ``psyche`` implementation. The real handler is a *kernel
-intrinsic* (``lingtai.kernel.intrinsics.psyche.handle(agent, args)``), wired live
+intrinsic* (``lingtai.core.psyche.handle(agent, args)``), wired live
 by ``BaseAgent._wire_intrinsics``; importing it here would break SDK
 import-purity and is unnecessary — this module ships *declarations + an injection
 seam* only. The wrapper-side bridge that supplies the handler lives in
@@ -80,7 +80,7 @@ from ..errors import BundleHostError
 PSYCHE_TOOL_NAME = "psyche"
 
 #: The live ``(object -> {actions})`` validity map, a language-neutral copy of
-#: ``lingtai.kernel.intrinsics.psyche._VALID_ACTIONS``. ``psyche`` dispatches on a
+#: ``lingtai.core.psyche._VALID_ACTIONS``. ``psyche`` dispatches on a
 #: pair, not a flat action enum, so this records which actions each object
 #: accepts. Pinned against the kernel by ``tests/test_sdk_psyche_tools.py`` so the
 #: declaration cannot drift from the live dispatch table.
@@ -127,7 +127,7 @@ PSYCHE_OBJECT_ACTION_RISK: dict[tuple[str, str], SecurityDanger] = {
 
 #: The ``(object, action)`` pairs that write persistent state or shed context — a
 #: declaration of the lasting side effects of the bundle (the live writes are the
-#: kernel intrinsic's, not here). Everything that is not a pure ``*.load`` read.
+#: built-in tool's, not here). Everything that is not a pure ``*.load`` read.
 PSYCHE_MUTATING_PAIRS: frozenset[tuple[str, str]] = frozenset(
     pair
     for pair, grade in PSYCHE_OBJECT_ACTION_RISK.items()
@@ -193,7 +193,7 @@ def psyche_identity_host(handler: ToolHandler) -> NativeBundleHost:
     handlers for *all three* core bundles together — this seam hosts ``psyche``
     alone, so the wrapper bridge can adopt the identity/context surface
     incrementally without supplying ``system`` / ``soul``. The handler is whatever
-    the wrapper bridge injects (the real kernel intrinsic ``psyche.handle`` bound
+    the wrapper bridge injects (the real built-in tool ``psyche.handle`` bound
     to an agent); this shim never imports or calls the real implementation, and
     ``native_core_host`` enforces the manifest/handler/native-authority contract.
 

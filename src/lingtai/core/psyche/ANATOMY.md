@@ -1,4 +1,4 @@
-# intrinsics/psyche
+# core/psyche
 
 Agent identity, working notes, and context lifecycle — the "bare essentials of self." Provides the agent with tools to manage its own identity, working notes (pad), and conversation context (molt). The core shed-and-reload machinery that enables cross-session persistence.
 
@@ -38,7 +38,7 @@ Agent identity, working notes, and context lifecycle — the "bare essentials of
 
 - **Inbound:** `handle()` is called by the tool dispatcher (via `base_agent._dispatch_tool`). `boot()` is called during agent construction in `base_agent/__init__.py:398`.
 - **Inbound (cross-module):** `context_forget` is called by `base_agent/lifecycle.py:235-236` (warning ladder), `base_agent/turn.py:341-342` (AED), and `base_agent/turn.py:353-354` (`.forget` signal).
-- **Inbound (cross-module):** `_write_molt_snapshot` is imported by `intrinsics/soul/consultation.py` for snapshot loading via `_load_snapshot_interface`.
+- **Inbound (cross-module):** `_write_molt_snapshot` is imported by `core/soul/consultation.py` for snapshot loading via `_load_snapshot_interface`.
 - **Outbound:** Depends on `..i18n` (translations), `..llm.interface` (`ToolCallBlock`, `ToolResultBlock`), `..token_counter` (token budget checks in `_pad_append`).
 - **Data flow:** All state lives in the filesystem under `system/` (`pad.md`, `lingtai.md`, `pad_append.json`, `summaries/`) and `history/` (`chat_history.jsonl`, `chat_history_archive.jsonl`, `snapshots/`). `_lingtai_load` reads `lingtai.md` alone (→ `character` section); `system/covenant.md` is owned by `Agent._reload_prompt_sections` (→ `covenant` section), not this package. The molt path also touches `.notification/` (deletes everything in it) and the agent's notification-tracking attributes.
 

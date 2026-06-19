@@ -541,8 +541,9 @@ def test_agent_rewire_clears_stale_bundle_guard_on_emptied_capabilities():
 # (``system`` / ``psyche`` / ``soul``) into a named ``core_manifest_registry``
 # and adds ``collect_core_bundle_manifests`` for the intrinsic core surfaces.
 #
-# The core surfaces are kernel *intrinsics* (registered in
-# ``lingtai.kernel.intrinsics.__init__``), always present and NOT listed in an
+# The core surfaces are kernel *intrinsics* (built-in tools registered in
+# ``lingtai.kernel.builtin_tools``, implementations under ``lingtai.core.<tool>``),
+# always present and NOT listed in an
 # agent's ``_capabilities``. The capability-walk collector therefore never
 # reaches them; default live wiring explicitly includes the core collector so
 # default agents warn for declared core tools while remaining advisory-only and

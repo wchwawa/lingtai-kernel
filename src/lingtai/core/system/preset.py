@@ -46,7 +46,7 @@ def _check_context_fits(agent, preset_name: str) -> tuple:
     When fits=False, returns a user-facing error message and a dict of fields
     for the preset_swap_refused_oversize log event.
     """
-    from ...presets import load_preset, preset_context_limit
+    from lingtai.kernel.presets import load_preset, preset_context_limit
 
     try:
         preset = load_preset(preset_name, working_dir=agent._working_dir)
@@ -77,7 +77,7 @@ def _check_context_fits(agent, preset_name: str) -> tuple:
 
 
 def _refresh(agent, args: dict) -> dict:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     reason = args.get("reason", "")
     preset_name = args.get("preset")
     revert_preset = args.get("revert_preset", False)
@@ -213,8 +213,8 @@ def _presets(agent, args: dict) -> dict:
     No caching — every call is a fresh check.
     """
     import json
-    from ...presets import load_preset, resolve_allowed_presets, home_shortened
-    from ...preset_connectivity import check_many
+    from lingtai.kernel.presets import load_preset, resolve_allowed_presets, home_shortened
+    from lingtai.kernel.preset_connectivity import check_many
 
     init_path = agent._working_dir / "init.json"
     try:
@@ -235,7 +235,7 @@ def _presets(agent, args: dict) -> dict:
     # Sorted by display path for stable ordering. Skip duplicates that may
     # arise if the same path appears more than once in `allowed`.
     seen: set[str] = set()
-    entries: list[tuple[str, "Path"]] = []
+    entries = []
     for path in allowed_paths:
         key = home_shortened(path)
         if key in seen:

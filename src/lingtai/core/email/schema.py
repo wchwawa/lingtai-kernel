@@ -1,7 +1,7 @@
 """Schema and description for the email intrinsic tool."""
 from __future__ import annotations
 
-from ...i18n import t
+from lingtai.kernel.i18n import t
 from .primitives import mode_field
 
 

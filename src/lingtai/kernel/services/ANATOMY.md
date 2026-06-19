@@ -9,7 +9,7 @@ Kernel-side service ABCs and implementations. Services back cross-cutting kernel
 - `services/mail.py` — message transport.
   - `MailService` is the ABC for `send()`, `listen()`, `stop()`, and `address` (`services/mail.py:29`).
   - `FilesystemMailService` implements directory-based delivery (`services/mail.py:81`); its constructor takes `working_dir`, `mailbox_rel`, and optional pseudo-agent subscriptions (`services/mail.py:94`).
-  - `send()` resolves peer/absolute addresses, checks `is_agent`/`is_alive`, generates ids through `intrinsics.email._new_mailbox_id`, copies attachments, and writes `message.json` atomically (`services/mail.py:131`, `services/mail.py:165`, `services/mail.py:199-206`).
+  - `send()` resolves peer/absolute addresses, checks `is_agent`/`is_alive`, generates ids through `builtin_tools.get_builtin_tool_module('email')._new_mailbox_id`, copies attachments, and writes `message.json` atomically (`services/mail.py:131`, `services/mail.py:163`, `services/mail.py:199-206`).
   - `listen()` starts a daemon polling thread (`services/mail.py:216`), snapshots existing inbox ids into `_seen` (`services/mail.py:224-227`), scans every 0.5s (`services/mail.py:256`), and also claims subscribed pseudo-agent outbox messages (`services/mail.py:250-253`, `services/mail.py:261-368`).
   - `stop()` sets the poll stop event and joins the thread (`services/mail.py:370-374`).
 - `services/logging.py` — structured event log and additive SQLite trace query index.
@@ -25,13 +25,13 @@ Kernel-side service ABCs and implementations. Services back cross-cutting kernel
 - `BaseAgent.__init__` creates a `CompositeLoggingService` over `logs/events.jsonl` plus additive `logs/log.sqlite` (`base_agent/__init__.py:273-285`).
 - `BaseAgent` receives a `MailService | None` constructor argument (`base_agent/__init__.py:230`); missing mail service disables the email intrinsic (`base_agent/__init__.py:158`).
 - Email boot wires `FilesystemMailService.listen(on_message=agent._on_mail)` through the email intrinsic (`base_agent/__init__.py:441-442`).
-- `services/mail.py` imports `handshake.{is_agent,is_alive,resolve_address}` for routing/liveness (`services/mail.py:24`) and late-imports `_new_mailbox_id` from `intrinsics.email` inside `send()` to avoid a module-level cycle (`services/mail.py:165`).
+- `services/mail.py` imports `handshake.{is_agent,is_alive,resolve_address}` for routing/liveness (`services/mail.py:24`) and late-imports `_new_mailbox_id` through `builtin_tools.get_builtin_tool_module('email')` inside `send()` to avoid a module-level cycle (`services/mail.py:163`).
 
 ## Composition
 
 - **Parent:** `src/lingtai/kernel/` (see `ANATOMY.md`).
 - **Subfolders:** none.
-- **Sibling consumers:** `intrinsics/` owns mailbox tool behavior; `base_agent/` owns logging lifecycle; `src/lingtai_cli/host.py` exposes `lingtai-agent` / `lingtai-cli log {rebuild,doctor,query}` (`../lingtai_cli/host.py:301-341`); `src/lingtai/cli.py` remains a compatibility shim.
+- **Sibling consumers:** `core/email/` owns mailbox tool behavior; `base_agent/` owns logging lifecycle; `src/lingtai_cli/host.py` exposes `lingtai-agent` / `lingtai-cli log {rebuild,doctor,query}` (`../lingtai_cli/host.py:301-341`); `src/lingtai/cli.py` remains a compatibility shim.
 
 ## State
 

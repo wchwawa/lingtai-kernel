@@ -232,7 +232,6 @@ def _persist_soul_config(agent, new_values: dict) -> str | None:
     unaffected).
     """
     import json
-    import os
     from pathlib import Path
 
     init_path: Path = agent._working_dir / "init.json"
@@ -355,7 +354,7 @@ def _build_soul_system_prompt(agent, kind: str = "inquiry") -> str:
       - any other profile name    → look up ``soul.voice.<name>.prompt`` from i18n
       - missing/empty profile     → fall back to "inner"
     """
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     if kind == "inquiry":
         return t(agent._config.language, "soul.system_prompt")
 

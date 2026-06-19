@@ -3,12 +3,12 @@ from __future__ import annotations
 
 
 def get_description(lang: str = "en") -> str:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return t(lang, "system_tool.description")
 
 
 def get_schema(lang: str = "en") -> dict:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return {
         "type": "object",
         "properties": {

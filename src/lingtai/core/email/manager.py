@@ -15,14 +15,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...i18n import t
-from ...time_veil import scrub_time_fields
-from ...token_counter import count_tokens
+from lingtai.kernel.time_veil import scrub_time_fields
+from lingtai.kernel.token_counter import count_tokens
 
 from .primitives import (
     _coerce_address_list,
     _email_time,
-    _is_self_send,
     _list_inbox,
     _load_message,
     _mailbox_dir,
@@ -30,17 +28,14 @@ from .primitives import (
     _mark_read,
     _message_summary,
     _new_mailbox_id,
-    _outbox_dir,
-    _persist_to_inbox,
     _persist_to_outbox,
     _preview,
     _read_ids,
     _save_read_ids,
-    _sent_dir,
 )
 
 if TYPE_CHECKING:
-    from ...base_agent import BaseAgent
+    from lingtai.kernel.base_agent import BaseAgent
 
 
 class EmailManager:
@@ -122,7 +117,7 @@ class EmailManager:
         to avoid circular import at module load (intrinsics →
         base_agent crosses the layering boundary).
         """
-        from ...base_agent.messaging import _rerender_unread_digest
+        from lingtai.kernel.base_agent.messaging import _rerender_unread_digest
         _rerender_unread_digest(self._agent)
 
     def _email_summary(self, e: dict, read_set: set[str] | None = None, truncate: int = 500) -> dict:

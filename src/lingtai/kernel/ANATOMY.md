@@ -10,7 +10,7 @@ The minimal agent runtime: turn loop, lifecycle, signal consumption, tool dispat
 
 The kernel root holds the coordinator (`base_agent/`) plus a flat collection of supporting modules. Most are self-contained leaves; subfolders are concept-boundary units with their own anatomy.
 
-- `base_agent/` — `BaseAgent`, the kernel coordinator (package of 6 modules). `__init__.py` defines `BaseAgent` (~1481 lines: constructor, properties, state machine, hooks, cross-cutting stubs including the `.notification/` sync trio, pass-throughs to submodules). Submodules: `lifecycle.py` (start/stop/heartbeat/signals/refresh — heartbeat tick now also calls `_sync_notifications`), `turn.py` (main loop/message dispatch/AED/response processing), `tools.py` (tool schemas/dispatch/registry), `identity.py` (naming/manifest/status), `prompt.py` (system prompt building/flushing), `messaging.py` (mail/notification producers/outbound). Soul-flow domain logic lives in `intrinsics/soul/flow.py`. See `base_agent/ANATOMY.md`.
+- `base_agent/` — `BaseAgent`, the kernel coordinator (package of 6 modules). `__init__.py` defines `BaseAgent` (~1481 lines: constructor, properties, state machine, hooks, cross-cutting stubs including the `.notification/` sync trio, pass-throughs to submodules). Submodules: `lifecycle.py` (start/stop/heartbeat/signals/refresh — heartbeat tick now also calls `_sync_notifications`), `turn.py` (main loop/message dispatch/AED/response processing), `tools.py` (tool schemas/dispatch/registry), `identity.py` (naming/manifest/status), `prompt.py` (system prompt building/flushing), `messaging.py` (mail/notification producers/outbound). Soul-flow domain logic lives in `lingtai.core.soul.flow` (built-in tool, reached lazily via `builtin_tools`). See `base_agent/ANATOMY.md`.
 - `nudge/` — **per-agent periodic checks** that publish notification reminders when something needs the agent's attention. `__init__.py:run_checks(agent)` is called once per heartbeat tick from `base_agent/lifecycle.py:_heartbeat_loop` (~line 320, wrapped in try/except). Each check is a self-contained module under `nudge/` exposing `check(agent) -> None`. `kernel_version.py` uses the shared `.notification/nudge.json` multi-entry payload to detect newer wheels and nudges the agent to refresh. `goal.py` is an IDLE-only check that reads protected `.notification/goal.json`; if the file exists, is active, and the idle delay has elapsed, it publishes one short `goal.reminder` event into `.notification/system.json` pointing back to `goal.json` and the goal manual. See `nudge/ANATOMY.md` for details and the "add a new nudge" recipe.
 - `notifications.py` — **canonical `.notification/` filesystem helpers**. Channel names are syntax-checked and then allowlisted: built-ins (`email`, `soul`, `system`, `goal`, `nudge`, `molt`, `post-molt`, `bash`, `cron`, `btw`, `tool_loop_guard`) plus dynamic `mcp.*` bridge channels. Unknown files in `.notification/` are ignored by `notification_fingerprint()` and `collect_notifications()` and rejected by helper publish/clear/dismiss calls. `notification_fingerprint()` is byte-content-based (`name`, byte count, SHA-256) so byte-identical producer rewrites do not wake/reinject solely because mtime changed. `publish(workdir, tool_name, payload)` writes one file atomically (tmp+rename); `clear(workdir, tool_name)` deletes one file (idempotent); `submit(workdir, tool_name, *, data, header, icon, priority, instructions=None)` is the canonical producer-facing helper. `dismiss_channel()` is the strict agent-facing generic dismiss path: protected source-of-truth channels such as `goal` refuse generic dismiss, while `system` additionally supports atomic single-event removal by `event_id` or `ref_id` without deleting the rest of `system.json`. The `system` intrinsic re-exports `submit` as `publish_notification` and `clear` as `clear_notification`.
 - `session.py` — `SessionManager`. LLM session lifecycle, token bookkeeping, chat history persistence, AED (auto-error-recovery) retry path. `send()` owns prompt/tool refresh, health checks, LLM dispatch, and usage accounting; notification delivery stays in `BaseAgent._sync_notifications` so session sends never mutate unrelated tool-result content.
@@ -70,8 +70,8 @@ Producers write a JSON file per channel into `<workdir>/.notification/`:
 
 | File | Owner | Naming convention |
 |---|---|---|
-| `email.json` | `intrinsics/email` (unread digest, `_rerender_unread_digest`) | bare intrinsic name |
-| `soul.json` | `intrinsics/soul/flow.py` (consultation fire) | bare intrinsic name |
+| `email.json` | `core/email` (unread digest, `_rerender_unread_digest`) | bare intrinsic name |
+| `soul.json` | `core/soul/flow.py` (consultation fire) | bare intrinsic name |
 | `system.json` | `base_agent/messaging.py:_enqueue_system_notification` (events list, max 20 newest; supports per-event dismiss by `event_id`/`ref_id`) | bare intrinsic name |
 | `goal.json` | active-goal source of truth (protected from generic dismiss) | bare intrinsic name |
 | `mcp.<server>.json` | external MCP server adapter (e.g. `mcp.imap.json`, `mcp.telegram.json`) | dotted prefix |
@@ -89,7 +89,7 @@ At most ONE live notification payload exists in the wire history at any time. Th
 In-process producers call **`publish_notification`** (re-exported by the `system` intrinsic from `notifications.submit`) — the canonical helper that wraps `notifications.publish` with the standard envelope:
 
 ```python
-from lingtai.kernel.intrinsics.system import publish_notification, clear_notification
+from lingtai.core.system import publish_notification, clear_notification
 
 publish_notification(
     agent._working_dir, "email",
@@ -127,7 +127,7 @@ Four pieces of state on `BaseAgent` (`base_agent/__init__.py:415-439`):
 
 The sync loop runs from **two trigger points**:
 1. **Heartbeat tick** (`base_agent/lifecycle.py:328`) — `agent._sync_notifications()` after `_check_rules_file`. Default cadence is the heartbeat interval (~1s); the producer's `_wake_nap` calls also nudge the heartbeat for sub-second latency.
-2. **Voluntary calls** — `system(action="notification")` (`intrinsics/system/__init__.py:92-115`) returns a placeholder dict (`_notification_placeholder: True` + explanatory message); the canonical `notifications` + `_notification_guidance` keys are stamped onto that same result by the ACTIVE-path `attach_active_notifications` post-hook, just like any other dict-shaped tool result. There is no separate "voluntary returns bare channel keys" code path — notifications surface only via the meta-block path so at most one live notification payload exists in history at any moment.
+2. **Voluntary calls** — `system(action="notification")` (`core/system/__init__.py:92-115`) returns a placeholder dict (`_notification_placeholder: True` + explanatory message); the canonical `notifications` + `_notification_guidance` keys are stamped onto that same result by the ACTIVE-path `attach_active_notifications` post-hook, just like any other dict-shaped tool result. There is no separate "voluntary returns bare channel keys" code path — notifications surface only via the meta-block path so at most one live notification payload exists in history at any moment.
 
 `_sync_notifications` (`base_agent/__init__.py:817`):
 1. Compute fingerprint. If unchanged, return (cheap path — the common case).
@@ -152,7 +152,7 @@ The filesystem-as-protocol redesign collapses all four into "write a file, read 
 
 ### Voluntary `system(action="notification")` — read-your-mailbox path
 
-Beyond kernel-driven sync, agents can call `system(action="notification")` themselves. The handler (`intrinsics/system/__init__.py:92-115`) returns a placeholder dict — `{"_notification_placeholder": True, "message": "…"}` — and never builds the bare channel collection itself. The turn-loop post-hook `attach_active_notifications` then stamps the canonical `notifications` + `_notification_guidance` payload onto that same result, exactly as it would for any other dict-shaped tool result. From the agent's perspective this is indistinguishable in shape from a kernel-synthesized pair (which additionally carries `_synthesized: True`). Useful when the agent wants to recheck producers without waiting for the next sync tick — and because the read path is unified with the meta-block stamp, there is never a duplicate representation of the same channels in one result.
+Beyond kernel-driven sync, agents can call `system(action="notification")` themselves. The handler (`core/system/__init__.py:92-115`) returns a placeholder dict — `{"_notification_placeholder": True, "message": "…"}` — and never builds the bare channel collection itself. The turn-loop post-hook `attach_active_notifications` then stamps the canonical `notifications` + `_notification_guidance` payload onto that same result, exactly as it would for any other dict-shaped tool result. From the agent's perspective this is indistinguishable in shape from a kernel-synthesized pair (which additionally carries `_synthesized: True`). Useful when the agent wants to recheck producers without waiting for the next sync tick — and because the read path is unified with the meta-block stamp, there is never a duplicate representation of the same channels in one result.
 
 ### Migration window — `tc_inbox` is dormant, not deleted
 
@@ -163,7 +163,7 @@ Phase 2 (`d2da97e`) migrated all in-tree producers (mail, system events, soul fl
 
 ### Adjacent: healing mid-pair tails
 
-Distinct primitive (and unrelated to notifications) — `interface.close_pending_tool_calls(reason)` (`llm/interface.py:405`) synthesizes `tool_result` placeholders for orphan tool_calls when the wire chat itself ends mid-pair (process killed mid-turn, snapshot saved mid-turn). Marks them `synthesized=True`; if a real result arrives later for the same id, `add_tool_results` overwrites the placeholder so the wire stays honest. Used in `base_agent/turn.py:317-321, 419-423, 451-455, 889-893` after sleep/retry/continuation exceptions, and at snapshot save time in `intrinsics/psyche/_snapshots.py`. The notification path repurposes the same `synthesized=True` flag, but the two systems don't share code.
+Distinct primitive (and unrelated to notifications) — `interface.close_pending_tool_calls(reason)` (`llm/interface.py:405`) synthesizes `tool_result` placeholders for orphan tool_calls when the wire chat itself ends mid-pair (process killed mid-turn, snapshot saved mid-turn). Marks them `synthesized=True`; if a real result arrives later for the same id, `add_tool_results` overwrites the placeholder so the wire stays honest. Used in `base_agent/turn.py:317-321, 419-423, 451-455, 889-893` after sleep/retry/continuation exceptions, and at snapshot save time in `core/psyche/_snapshots.py`. The notification path repurposes the same `synthesized=True` flag, but the two systems don't share code.
 
 ### Historical note: retired ACTIVE meta-prefix injection
 
@@ -174,7 +174,7 @@ Issue #82/#83 retired the ACTIVE-state `notifications:\n<json>\n\n` prefix path.
 This file is the top of the kernel anatomy tree. Each subfolder below has its own `ANATOMY.md` — descend into the one that holds your question.
 
 - [`base_agent/`](base_agent/ANATOMY.md) — `BaseAgent` class (the kernel coordinator). 7 submodules: identity, lifecycle, turn, soul_flow, tools, prompt, messaging.
-- [`intrinsics/`](intrinsics/ANATOMY.md) — kernel-built-in tools. Four intrinsics: `system`, `psyche`, `soul`, `email`. Always present, never removable.
+- `builtin_tools.py` — lazy registry of the four always-present built-in tools (`system`, `psyche`, `soul`, `email`). It records each tool's module path as a string and imports `lingtai.core.<tool>` only when an agent wires/renders its tool surface, so `import lingtai.kernel` / `import lingtai_sdk` stays import-light. The implementations themselves live in the wrapper package under `src/lingtai/core/<tool>/` (see `core/<tool>/ANATOMY.md`); they are always present and never removable.
 - [`llm/`](llm/ANATOMY.md) — LLM service ABC, adapter registry, chat interface, streaming protocol. Provider adapters live in the wrapper package, not here.
 - [`services/`](services/ANATOMY.md) — kernel-side service implementations: filesystem mailbox (`mail.py`), JSONL event log plus additive SQLite query index (`logging.py`).
 - [`migrate/`](migrate/ANATOMY.md) — versioned, append-only migrations for kernel-managed on-disk state. Preset-domain migrations are `m<NNN>_<name>.py`; agent-workdir/init migrations are `agent_m<NNN>_<name>.py`.

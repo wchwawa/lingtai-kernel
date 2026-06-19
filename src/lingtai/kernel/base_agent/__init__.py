@@ -24,7 +24,7 @@ from ..config import AgentConfig
 from ..state import AgentState
 from ..workdir import WorkingDir
 from ..message import Message
-from ..intrinsics import ALL_INTRINSICS
+from ..builtin_tools import BUILTIN_TOOL_NAMES, get_builtin_tool_module
 from ..prompt import SystemPromptManager
 from ..llm import (
     FunctionSchema,
@@ -562,12 +562,11 @@ class BaseAgent:
             build_system_batches_fn=self._build_system_prompt_batches,
         )
 
-        # Boot the psyche intrinsic
-        from ..intrinsics import psyche as _psyche
+        # Boot built-in tool startup hooks.
+        _psyche = get_builtin_tool_module("psyche")
         _psyche.boot(self)
 
-        # Boot the email intrinsic
-        from ..intrinsics import email as _email
+        _email = get_builtin_tool_module("email")
         _email.boot(self)
 
     # ------------------------------------------------------------------
@@ -575,9 +574,10 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def _wire_intrinsics(self) -> None:
-        """Wire kernel intrinsic tool handlers."""
-        for name, info in ALL_INTRINSICS.items():
-            handle_fn = info["module"].handle
+        """Wire built-in tool handlers."""
+        for name in BUILTIN_TOOL_NAMES:
+            module = get_builtin_tool_module(name)
+            handle_fn = module.handle
             self._intrinsics[name] = lambda args, fn=handle_fn: fn(self, args)
 
     # ------------------------------------------------------------------
@@ -687,7 +687,10 @@ class BaseAgent:
         cancels it.  The timer does NOT reschedule itself after firing —
         the next IDLE transition starts a fresh countdown.
         """
-        from ..intrinsics.soul.flow import _start_soul_timer, _cancel_soul_timer
+        from ..builtin_tools import get_builtin_tool_module
+        _soul = get_builtin_tool_module('soul')
+        _start_soul_timer = _soul._start_soul_timer
+        _cancel_soul_timer = _soul._cancel_soul_timer
 
         old = self._state
         if old == new_state:
@@ -838,15 +841,18 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def _start_soul_timer(self) -> None:
-        from ..intrinsics.soul.flow import _start_soul_timer
+        from ..builtin_tools import get_builtin_tool_module
+        _start_soul_timer = get_builtin_tool_module('soul')._start_soul_timer
         _start_soul_timer(self)
 
     def _cancel_soul_timer(self) -> None:
-        from ..intrinsics.soul.flow import _cancel_soul_timer
+        from ..builtin_tools import get_builtin_tool_module
+        _cancel_soul_timer = get_builtin_tool_module('soul')._cancel_soul_timer
         _cancel_soul_timer(self)
 
     def _soul_whisper(self) -> None:
-        from ..intrinsics.soul.flow import _soul_whisper
+        from ..builtin_tools import get_builtin_tool_module
+        _soul_whisper = get_builtin_tool_module('soul')._soul_whisper
         _soul_whisper(self)
 
     def _drain_tc_inbox(self) -> None:
@@ -1390,27 +1396,33 @@ class BaseAgent:
         return True
 
     def _persist_soul_entry(self, result: dict, mode: str = "flow", source: str = "agent") -> None:
-        from ..intrinsics.soul.flow import _persist_soul_entry
+        from ..builtin_tools import get_builtin_tool_module
+        _persist_soul_entry = get_builtin_tool_module('soul')._persist_soul_entry
         _persist_soul_entry(self, result, mode=mode, source=source)
 
     def _append_soul_flow_record(self, record: dict) -> None:
-        from ..intrinsics.soul.flow import _append_soul_flow_record
+        from ..builtin_tools import get_builtin_tool_module
+        _append_soul_flow_record = get_builtin_tool_module('soul')._append_soul_flow_record
         _append_soul_flow_record(self, record)
 
     def _run_inquiry(self, question: str, source: str = "agent") -> None:
-        from ..intrinsics.soul.inquiry import _run_inquiry
+        from ..builtin_tools import get_builtin_tool_module
+        _run_inquiry = get_builtin_tool_module('soul')._run_inquiry
         _run_inquiry(self, question, source=source)
 
     def _flatten_v3_for_pair(self, voice: dict) -> dict:
-        from ..intrinsics.soul.flow import _flatten_v3_for_pair
+        from ..builtin_tools import get_builtin_tool_module
+        _flatten_v3_for_pair = get_builtin_tool_module('soul')._flatten_v3_for_pair
         return _flatten_v3_for_pair(self, voice)
 
     def _run_consultation_fire(self) -> None:
-        from ..intrinsics.soul.flow import _run_consultation_fire
+        from ..builtin_tools import get_builtin_tool_module
+        _run_consultation_fire = get_builtin_tool_module('soul')._run_consultation_fire
         _run_consultation_fire(self)
 
     def _rehydrate_appendix_tracking(self) -> None:
-        from ..intrinsics.soul.flow import _rehydrate_appendix_tracking
+        from ..builtin_tools import get_builtin_tool_module
+        _rehydrate_appendix_tracking = get_builtin_tool_module('soul')._rehydrate_appendix_tracking
         _rehydrate_appendix_tracking(self)
 
     # ------------------------------------------------------------------
