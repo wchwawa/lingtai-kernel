@@ -4,7 +4,7 @@ The 2-layer tool dispatch: intrinsics (built-in) + capabilities/MCP.
 """
 from __future__ import annotations
 
-from ..intrinsics import ALL_INTRINSICS
+from ..builtin_tools import get_builtin_tool_module
 from ..llm import FunctionSchema
 from ..i18n import t as _t
 from ..types import UnknownToolError
@@ -37,9 +37,8 @@ def _refresh_tool_inventory_section(agent) -> None:
     lang = agent._config.language
     lines = []
     for name in agent._intrinsics:
-        info = ALL_INTRINSICS.get(name)
-        if info:
-            lines.append(f"### {name}\n{info['module'].get_description(lang)}")
+        module = get_builtin_tool_module(name)
+        lines.append(f"### {name}\n{module.get_description(lang)}")
     for s in agent._tool_schemas:
         if s.description:
             lines.append(f"### {s.name}\n{s.description}")
@@ -68,19 +67,18 @@ def _build_tool_schemas(agent) -> list[FunctionSchema]:
     # Intrinsic schemas
     lang = agent._config.language
     for name in agent._intrinsics:
-        info = ALL_INTRINSICS.get(name)
-        if info:
-            params = dict(info["module"].get_schema(lang))
-            props = dict(params.get("properties", {}))
-            props.update(reasoning_prop)
-            params["properties"] = props
-            schemas.append(
-                FunctionSchema(
-                    name=name,
-                    description=info["module"].get_description(lang),
-                    parameters=params,
-                )
+        module = get_builtin_tool_module(name)
+        params = dict(module.get_schema(lang))
+        props = dict(params.get("properties", {}))
+        props.update(reasoning_prop)
+        params["properties"] = props
+        schemas.append(
+            FunctionSchema(
+                name=name,
+                description=module.get_description(lang),
+                parameters=params,
             )
+        )
 
     # Capability + MCP schemas — inject reasoning into each
     for s in agent._tool_schemas:

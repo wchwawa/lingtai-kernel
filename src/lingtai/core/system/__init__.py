@@ -55,7 +55,7 @@ from .notification import _dismiss  # noqa: F401
 # function lives in ``lingtai.kernel.notifications`` (single source of
 # truth, accessible to non-intrinsic call sites and external producers
 # that import the module directly).
-from ...notifications import (  # noqa: F401
+from lingtai.kernel.notifications import (  # noqa: F401
     submit as publish_notification,
     clear as clear_notification,
 )

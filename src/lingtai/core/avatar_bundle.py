@@ -15,7 +15,7 @@ bundle-execution pattern end to end against actual behavior.
 Where the real handlers live — and why the bridge lives here
 ------------------------------------------------------------
 ``avatar`` is a **wrapper capability** (like ``daemon``, ``mcp``, ``knowledge``,
-``skills``, ``bash``, and the file tools), not a kernel intrinsic. Its real
+``skills``, ``bash``, and the file tools), not a built-in tool. Its real
 handlers are the ``handle_spawn`` / ``handle_rules`` methods of an
 :class:`~lingtai.core.avatar.AvatarManager` built by
 ``lingtai.core.avatar.make_manager(agent)`` — the *same* manager

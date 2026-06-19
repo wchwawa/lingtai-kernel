@@ -632,7 +632,7 @@ class DaemonManager:
         narrow exception so a parent can grant a running daemon local-network
         communication when the task prompt calls for it.
         """
-        from lingtai.kernel.intrinsics import ALL_INTRINSICS
+        from lingtai.kernel.builtin_tools import get_builtin_tool_module
 
         allowed = {"email"}
         schemas: dict[str, FunctionSchema] = {}
@@ -641,10 +641,7 @@ class DaemonManager:
         for name in sorted(allowed):
             if name not in self._agent._intrinsics:
                 continue
-            info = ALL_INTRINSICS.get(name)
-            if not info:
-                continue
-            module = info["module"]
+            module = get_builtin_tool_module(name)
             schemas[name] = FunctionSchema(
                 name=name,
                 description=module.get_description(lang),

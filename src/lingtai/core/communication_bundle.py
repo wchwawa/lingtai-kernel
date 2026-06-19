@@ -9,12 +9,12 @@ bridge, stages 3A/3B). The SDK module :mod:`lingtai_sdk.communication_tools`
 injection seams, but — to respect the import boundary (the SDK must not import
 the wrapper, and the kernel must never import the SDK) — it ships **no real
 handler**. This module is where the wrapper, which *may* import the SDK and the
-kernel intrinsic, injects the genuine handlers and so proves the high-state
+built-in tool, injects the genuine handlers and so proves the high-state
 bundle-execution pattern end to end against actual behavior.
 
 Two surfaces, two carriers — matching the live wiring
 -----------------------------------------------------
-* ``email`` is a **kernel intrinsic**: ``lingtai.kernel.intrinsics.email.handle
+* ``email`` is a **built-in tool**: ``lingtai.core.email.handle
   (agent, args)``, wired live by ``BaseAgent._wire_intrinsics`` as
   ``self._intrinsics["email"] = lambda args: email.handle(self, args)`` — that
   closure is the live registration path, **left untouched** by this stage. The
@@ -55,11 +55,11 @@ if TYPE_CHECKING:
 
     from lingtai_sdk.bundles.host import BundleHost, NativeBundleHost
 
-# The single source of truth for ``email`` behavior — the kernel intrinsic the
+# The single source of truth for ``email`` behavior — the built-in tool the
 # live ``_wire_intrinsics`` path also dispatches. Imported at wrapper module load
-# (the wrapper may import the kernel intrinsic surface); the SDK is imported
+# (the wrapper may import the built-in tool surface); the SDK is imported
 # lazily inside the bridge functions to preserve the wrapper -> sdk import edge.
-from lingtai.kernel.intrinsics import email as _email
+import lingtai.core.email as _email
 
 # The wrapper's real daemon handler factory — the single source of truth shared
 # with the capability ``setup()`` path (``daemon.make_manager``).
@@ -87,7 +87,7 @@ def _kwargs_adapter_agent(
     handler: Callable[["BaseAgent", dict], Any],
     agent: "BaseAgent",
 ) -> Callable[..., Any]:
-    """Adapt a kernel intrinsic ``handle(agent, args)`` to a host's kwargs invocation.
+    """Adapt a built-in tool ``handle(agent, args)`` to a host's kwargs invocation.
 
     Binds *agent* and collects the host's kwargs back into the ``args`` dict so
     the real intrinsic runs unchanged — the email mirror of the adapter
@@ -103,7 +103,7 @@ def _kwargs_adapter_agent(
 def email_comm_handler(agent: "BaseAgent") -> Callable[..., Any]:
     """Build the kwargs-handler the SDK ``email`` host seam expects.
 
-    The handler is the kernel intrinsic ``email.handle`` — the *same* function
+    The handler is the built-in tool ``email.handle`` — the *same* function
     ``BaseAgent._wire_intrinsics`` wires live — bound to *agent* and adapted to
     the host's keyword-args invocation contract. Bound to *agent*, so it reads
     through ``agent._email_manager`` (and the configured mail service for external
@@ -131,7 +131,7 @@ def email_comm_bundle_host(agent: "BaseAgent") -> "NativeBundleHost":
 
     Returns a :class:`~lingtai_sdk.capability_host.NativeBundleHost` for
     ``email``, hosting the bundle's one declared tool with the wrapper's genuine
-    handler (the kernel intrinsic, bound to *agent*). The SDK is imported here, in
+    handler (the built-in tool, bound to *agent*). The SDK is imported here, in
     the wrapper, not at SDK module load — preserving the one-way ``wrapper -> sdk``
     direction. ``host.invoke("email", action=..., **args)`` runs the real mail
     logic through the declared manifest without altering the agent's live

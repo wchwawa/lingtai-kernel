@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from lingtai.kernel.intrinsics import system as sys_intrinsic
+from lingtai.core import system as sys_intrinsic
 from lingtai.kernel.llm.interface import ChatInterface
 from lingtai.kernel.tc_inbox import TCInbox
 

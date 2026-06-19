@@ -4,7 +4,7 @@
 
 Generic agent kernel. Single class `BaseAgent` with methods distributed across 6 helper modules. `__init__.py` retains the constructor, properties, state machine, and subclass-overridable hooks.
 
-> **History note:** there used to be a 7th module, `soul_flow.py`. It was deleted in `1acd183` — soul-domain logic moved to `intrinsics/soul/flow.py`, and the wire-splice logic that lived in it became `tc_inbox.TCInbox.drain_into()`. Mention preserved here only because old patches/discussions reference it.
+> **History note:** there used to be a 7th module, `soul_flow.py`. It was deleted in `1acd183` — soul-domain logic moved to `lingtai.core.soul.flow` (formerly `intrinsics/soul/flow.py`), and the wire-splice logic that lived in it became `tc_inbox.TCInbox.drain_into()`. Mention preserved here only because old patches/discussions reference it.
 
 ## Components
 
@@ -20,23 +20,23 @@ Generic agent kernel. Single class `BaseAgent` with methods distributed across 6
 ## Connections
 
 - All submodules are leaves — they import nothing from `base_agent/`. Cross-module communication is mediated through the `agent` parameter (the BaseAgent instance).
-- `__init__.py` imports from all submodules lazily (inside method bodies) to avoid circular imports at load time. Soul-flow pass-throughs now import from `intrinsics/soul/flow.py` and `intrinsics/soul/inquiry.py`.
+- `__init__.py` imports from all submodules lazily (inside method bodies) to avoid circular imports at load time. Soul-flow pass-throughs now import from `lingtai.core.soul.flow` and `lingtai.core.soul.inquiry`.
 - `__init__.py` → `notifications.py` (via `_sync_notifications` consuming `notification_fingerprint`/`collect_notifications`).
 - `__init__.py` constructs `SessionManager` without notification-specific send hooks; notification delivery is owned by `_sync_notifications` plus the ACTIVE canonical-payload attach step in `turn.py`.
-- `lifecycle.py` → `intrinsics/soul/flow.py` (via `agent._start_soul_timer()`, `agent._cancel_soul_timer()`), `intrinsics/soul/inquiry.py` (via `agent._run_inquiry()`), and `agent._sync_notifications()` on every heartbeat tick.
-- `turn.py` → `intrinsics/soul/flow.py` (via `agent._cancel_soul_timer()`), `intrinsics/soul/inquiry.py` (via `agent._run_inquiry()`). The `tc_inbox` drain calls in `_handle_request`, the pre-request hook, and `_handle_tc_wake` are still wired but always find an empty queue under the `.notification/` redesign.
-- `messaging.py` → `intrinsics/system` (via `publish_notification`/`clear_notification` for both `_rerender_unread_digest` and `_enqueue_system_notification`), and `notifications.collect_notifications` for the system-events RMW merge.
+- `lifecycle.py` → `lingtai.core.soul.flow` (via `agent._start_soul_timer()`, `agent._cancel_soul_timer()`), `lingtai.core.soul.inquiry` (via `agent._run_inquiry()`), and `agent._sync_notifications()` on every heartbeat tick.
+- `turn.py` → `lingtai.core.soul.flow` (via `agent._cancel_soul_timer()`), `lingtai.core.soul.inquiry` (via `agent._run_inquiry()`). The `tc_inbox` drain calls in `_handle_request`, the pre-request hook, and `_handle_tc_wake` are still wired but always find an empty queue under the `.notification/` redesign.
+- `messaging.py` → `lingtai.core.system` (via `publish_notification`/`clear_notification` for both `_rerender_unread_digest` and `_enqueue_system_notification`), and `notifications.collect_notifications` for the system-events RMW merge.
 - `prompt.py` → `tools.py` (via `agent._refresh_tool_inventory_section()`).
 - All submodules read agent attributes (`agent._config`, `agent._session`, `agent._chat`, `agent._notification_fp`, `agent._notification_live_holder`, etc.) — the agent object is the shared state.
 - `messaging.py` imports `from ..message import _make_message, MSG_REQUEST, MSG_TC_WAKE` and `from ..i18n import t as _t`. (`MSG_TC_WAKE` is no longer posted from `messaging.py` itself; the kernel sync owns wake transitions.)
-- `tools.py` imports `from ..intrinsics import ALL_INTRINSICS`, `from ..llm import FunctionSchema`, `from ..i18n import t as _t`.
+- `tools.py` imports `from ..builtin_tools import get_builtin_tool_module`, `from ..llm import FunctionSchema`, `from ..i18n import t as _t`. The built-in tool modules (`email`/`system`/`psyche`/`soul`) live under `lingtai.core.<tool>` and are imported lazily by `builtin_tools.get_builtin_tool_module` — never at kernel import time, to preserve SDK import-purity.
 - `turn.py` imports `from ..state import AgentState`, `from ..loop_guard import LoopGuard`, `from ..safety_limits import ACTIVE_TURN_TOOL_CALL_EMERGENCY_LIMIT`, and `from ..tool_executor import ToolExecutor`. `LoopGuard` now gets its total-call emergency fuse from kernel-owned `safety_limits.py`, not from `manifest.max_turns` / `AgentConfig.max_turns`; `turn.py` records each tool-call batch before dispatch so dict-shaped results can expose the post-batch ACTIVE-turn progress counter.
 - `lifecycle.py` imports `from ..state import AgentState`, `from ..token_ledger import sum_token_ledger`.
 
 ## Composition
 
 - **Parent:** `src/lingtai/kernel/` (see `ANATOMY.md`).
-- **Siblings:** `intrinsics/`, `llm/`, `services/`, `i18n/`, `session.py`, `tc_inbox.py`, `tool_executor.py`, `loop_guard.py`, `prompt.py`, `meta_block.py`, `config.py`, `state.py`, `workdir.py`, `message.py`.
+- **Siblings:** `builtin_tools.py` (lazy registry of the four built-in tool modules now living under `lingtai.core.<tool>`), `llm/`, `services/`, `i18n/`, `session.py`, `tc_inbox.py`, `tool_executor.py`, `loop_guard.py`, `prompt.py`, `meta_block.py`, `config.py`, `state.py`, `workdir.py`, `message.py`.
 
 ## State
 

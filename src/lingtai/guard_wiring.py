@@ -80,7 +80,7 @@ def default_manifest_registry() -> ManifestRegistry:
     No shipping *capability* declares an SDK bundle manifest yet, so capability
     manifests remain opt-in via this registry (or a caller-supplied one). Stage
     20 core manifests are collected through :func:`collect_core_bundle_manifests`
-    instead, because ``system`` / ``psyche`` / ``soul`` are kernel intrinsics,
+    instead, because ``system`` / ``psyche`` / ``soul`` are built-in tools,
     not wrapper capabilities listed in ``_capabilities``.
     """
     return {}
@@ -110,9 +110,9 @@ def collect_core_bundle_manifests(
     """Collect the core bundle manifests directly.
 
     Unlike :func:`collect_agent_bundle_manifests`, this does **not** gate on the
-    agent's ``_capabilities`` — the three core surfaces are kernel intrinsics
+    agent's ``_capabilities`` — the three core surfaces are built-in tools
     that are always present (registered in
-    ``lingtai.kernel.intrinsics.__init__``), never declared as wrapper
+    ``lingtai.kernel.builtin_tools``), never declared as wrapper
     capabilities. Stage 20 default wiring calls this seam unless
     ``include_core=False`` is passed to :func:`wire_agent_guard`.
 
@@ -277,7 +277,7 @@ def wire_agent_guard(
     * **Stage 20 (behaviour-active):** unless ``include_core=False``, also
       collects the three always-present core manifests (``system`` / ``psyche`` /
       ``soul``) via :func:`collect_core_bundle_manifests`. These surfaces are
-      kernel intrinsics — always present, never listed in ``_capabilities`` — so
+      built-in tools — always present, never listed in ``_capabilities`` — so
       the capability walk alone never reaches them; this is the seam that makes
       the Stage-18 wiring *behaviour-active* on every agent instead of dormant;
     * installs an **advisory** guard (default ``mode``) onto the Stage-16 seam:

@@ -46,7 +46,7 @@ from lingtai.kernel.tool_call_guard import ToolProposal
 # The real kernel intrinsic action sets — the source the SDK risk table mirrors.
 # Importing the kernel intrinsic here is allowed (kernel, not wrapper) and lets
 # the test pin the declaration against the live authority gate.
-from lingtai.kernel.intrinsics.system.karma import _KARMA_ACTIONS, _NIRVANA_ACTIONS
+from lingtai.core.system.karma import _KARMA_ACTIONS, _NIRVANA_ACTIONS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"

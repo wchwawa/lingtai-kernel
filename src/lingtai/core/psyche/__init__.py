@@ -39,12 +39,12 @@ from ._molt import _context_molt, _name_set, _name_nickname, context_forget  # n
 
 
 def get_description(lang: str = "en") -> str:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return t(lang, "psyche.description")
 
 
 def get_schema(lang: str = "en") -> dict:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return {
         "type": "object",
         "properties": {

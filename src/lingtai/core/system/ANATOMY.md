@@ -1,4 +1,4 @@
-# intrinsics/system
+# core/system
 
 System intrinsic — runtime, lifecycle, and synchronization. Provides the agent with refresh (hot-reload config/presets), karma-gated lifecycle actions on other agents (sleep, lull, suspend, cpr, interrupt, clear, nirvana), preset listing, voluntary notification reads (`action="notification"`), and a generic notification dismiss (`dismiss`). The system module is also the **conceptual home** of the notification surface — it re-exports `publish_notification` / `clear_notification` from the kernel-root `notifications.py` so any in-process producer (intrinsic, capability, or wired-in MCP server) submits through one canonical entry point.
 
@@ -9,7 +9,7 @@ System intrinsic — runtime, lifecycle, and synchronization. Provides the agent
 - `__init__.py` — Package surface. Re-exports all public API for backward compatibility. Contains:
   - `get_description` / `get_schema` (re-exported from `schema.py`) — tool registration.
   - `_dismiss` (re-exported from `notification.py`) — agent-facing generic notification dismiss; routes `channel`/`force` plus optional `event_id`/`ref_id` through `notifications.dismiss_channel` and keeps a one-release legacy `ids=` soak path. `event_id`/`ref_id` are accepted only for atomic single-event removal from `system.json`.
-  - **`publish_notification` / `clear_notification`** (re-exported from `lingtai.kernel.notifications` as `submit` / `clear`) — canonical producer entry point. Importable as `from lingtai.kernel.intrinsics.system import publish_notification, clear_notification`. The system module owns the notification surface conceptually; the implementation lives at the kernel root so non-intrinsic callers (and external scripts) can import it without going through the intrinsic surface.
+  - **`publish_notification` / `clear_notification`** (re-exported from `lingtai.kernel.notifications` as `submit` / `clear`) — canonical producer entry point. Importable as `from lingtai.core.system import publish_notification, clear_notification`. The system module owns the notification surface conceptually; the implementation lives at the kernel root so non-intrinsic callers (and external scripts) can import it without going through the intrinsic surface.
   - All handler functions re-exported from sub-modules for backward compatibility.
   - `handle()` (`__init__.py:82-109`) — main dispatcher with explicit dispatch table. The `notification` action takes a fast path that returns `collect_notifications(agent._working_dir)` directly without going through the dispatch table — voluntary reads of the agent's own `.notification/` state.
 
@@ -40,7 +40,7 @@ System intrinsic — runtime, lifecycle, and synchronization. Provides the agent
 ## Connections
 
 - **Inbound:** `handle()` is called by the tool dispatcher (via `base_agent._dispatch_tool`).
-- **Inbound (cross-module):** `publish_notification` is imported by `base_agent/messaging.py` (both `_rerender_unread_digest` and `_enqueue_system_notification`) and by `intrinsics/soul/flow.py:_run_consultation_fire`. `clear_notification` is imported by the same call sites for the empty-state path. `_dismiss` is no longer called from `email/manager.py` — email arrivals use the single-slot unread-digest pattern, and dismiss is a no-op shim regardless.
+- **Inbound (cross-module):** `publish_notification` is imported by `base_agent/messaging.py` (both `_rerender_unread_digest` and `_enqueue_system_notification`) and by `core/soul/flow.py:_run_consultation_fire`. `clear_notification` is imported by the same call sites for the empty-state path. `_dismiss` is no longer called from `email/manager.py` — email arrivals use the single-slot unread-digest pattern, and dismiss is a no-op shim regardless.
 - **Outbound:** Depends on `...notifications` (canonical `submit`/`clear`/`collect_notifications`), `...i18n` (translations), `...handshake` (`resolve_address`, `is_agent`, `is_alive`), `...state` (`AgentState`), `...presets` (preset loading), `...preset_connectivity` (connectivity probing).
 - **Data flow:** Karma actions write signal files (`.sleep`, `.suspend`, `.interrupt`, `.clear`) into target agent working directories. Preset swap reads/writes `init.json` manifest. The `notification` action reads `.notification/*.json` (read-only); `publish_notification` re-export writes them via `tmp + rename`.
 

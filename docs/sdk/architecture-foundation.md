@@ -1334,7 +1334,7 @@ Two structural differences drive the design:
 
 - **`system` is a kernel intrinsic, not a wrapper capability.** The file tools
   (`read`/`write`/…) are wrapper capabilities with a `make_handler(agent)` factory
-  in `lingtai.core.{...}`. `system` is `lingtai.kernel.intrinsics.system.handle(agent, args)`,
+  in `lingtai.core.{...}`. `system` is `lingtai.core.system.handle(agent, args)`,
   wired live by `BaseAgent._wire_intrinsics` as
   `self._intrinsics["system"] = lambda args: system.handle(self, args)`. There is
   no wrapper `make_handler` to extract, and nothing in the kernel may be made to
@@ -1410,8 +1410,10 @@ stays in the kernel intrinsic.
 `.core_bundles` / `.errors`; a bare `import lingtai_sdk.lifecycle_tools` pulls in
 no `lingtai` wrapper module (asserted by
 `tests/test_sdk_lifecycle_tools.py::test_lifecycle_tools_import_is_pure_and_migrates_no_wrapper`).
-Like `core_bundles`, it transitively loads `lingtai.kernel.intrinsics.*` — *kernel*,
-not the forbidden wrapper. The wrapper bridge `lingtai.core.system_bundle` imports
+Like `core_bundles`, it pulls in **no** tool implementation at import time — the
+built-in tool modules now live in the wrapper under `lingtai.core.<tool>` and are
+reached only lazily through the kernel's `builtin_tools` registry, never when the
+SDK bundle is declared. The wrapper bridge `lingtai.core.system_bundle` imports
 the SDK lazily inside its functions, so a bare import of the bridge leaves
 `lingtai_sdk` unloaded (asserted by
 `tests/test_system_bundle_bridge.py::test_bridge_does_not_import_sdk_at_wrapper_module_load`).
@@ -1442,7 +1444,7 @@ pattern as 3C, applied to two surfaces that ride *different* live carriers.
 The key insight is that these two high-state surfaces are wired live by **different
 mechanisms**, and the bundle declaration must mirror each:
 
-- **`email` is a kernel intrinsic** (`lingtai.kernel.intrinsics.email.handle(agent,
+- **`email` is a kernel intrinsic** (`lingtai.core.email.handle(agent,
   args)`), wired by `BaseAgent._wire_intrinsics` exactly like `system`. It is
   native-carried and privileged (it touches the agent's mailbox / notification
   state and the configured mail service), but **not** `native_only` — a backend

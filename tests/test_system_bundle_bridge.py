@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from lingtai.kernel.base_agent import BaseAgent
-from lingtai.kernel.intrinsics import system as sysintr
+from lingtai.core import system as sysintr
 from lingtai.core import system_bundle
 
 

@@ -59,8 +59,11 @@ def _rerender_unread_digest(agent) -> str | None:
     caller doesn't typically use the return value — the side-effect on
     ``.notification/`` is the contract.
     """
-    from ..intrinsics.system import publish_notification, clear_notification
-    from ..intrinsics.email.primitives import _render_unread_digest
+    from ..builtin_tools import get_builtin_tool_module
+    _system = get_builtin_tool_module('system')
+    publish_notification = _system.publish_notification
+    clear_notification = _system.clear_notification
+    _render_unread_digest = get_builtin_tool_module('email')._render_unread_digest
 
     body, count, newest_ts = _render_unread_digest(agent)
 
@@ -145,7 +148,8 @@ def _enqueue_system_notification(agent, *, source: str, ref_id: str, body: str) 
     import secrets
     from datetime import datetime, timezone
     from ..notifications import collect_notifications
-    from ..intrinsics.system import publish_notification
+    from ..builtin_tools import get_builtin_tool_module
+    publish_notification = get_builtin_tool_module('system').publish_notification
 
     event_id = f"evt_{int(time.time()*1000):x}_{secrets.token_hex(2)}"
     received_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

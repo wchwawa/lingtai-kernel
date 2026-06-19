@@ -1,4 +1,4 @@
-# intrinsics/soul
+# core/soul
 
 > **Maintenance:** see the `lingtai-kernel-anatomy` skill. **Coding agents** update this file in the same commit as code changes. **LingTai agents** report drift as issues (mail or `discussions/<name>-patch.md`); do not silently fix.
 
@@ -42,6 +42,6 @@ simultaneously.
 
 ## Composition
 
-- **Parent:** `src/lingtai/kernel/intrinsics/` (see `intrinsics/ANATOMY.md`).
-- **Siblings:** `system/`, `psyche/`, `email/` (all sub-packages in the parent folder; flat-file intrinsics are gone).
+- **Parent:** `src/lingtai/core/` (see `core/ANATOMY.md`). The four built-in tools (`email`/`system`/`psyche`/`soul`) live here alongside the rest of the tool implementations; the kernel reaches them lazily through `lingtai.kernel.builtin_tools`.
+- **Siblings:** `system/`, `psyche/`, `email/` (the other three built-in tool sub-packages; flat-file intrinsics are gone).
 - **Kernel hooks:** `base_agent/__init__.py` calls `_start_soul_timer`/`_cancel_soul_timer`/`_run_consultation_fire`/`_rehydrate_appendix_tracking` from `flow.py` and `_run_inquiry` from `inquiry.py` at lifecycle moments.

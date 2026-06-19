@@ -25,13 +25,8 @@ tool is now request/response only.
 """
 from __future__ import annotations
 
+from lingtai.kernel.notifications import register_generic_dismiss_guard
 
-from ...notifications import register_generic_dismiss_guard
-
-register_generic_dismiss_guard(
-    "email",
-    "email(action='dismiss', email_id=[...]) or email(action='read', email_id=[...])",
-)
 
 # --- Re-exports from sub-modules for backward compatibility ---
 
@@ -55,6 +50,7 @@ from .primitives import (  # noqa: F401
     _preview,
     _read_ids,
     _read_ids_path,
+    _render_unread_digest,
     _save_read_ids,
     _sent_dir,
     _summary_to_list,
@@ -99,7 +95,7 @@ def boot(agent) -> None:
     """Boot-time hook: instantiate manager and wire it onto the agent.
 
     The intrinsic registration (add_tool with schema/handler/description) is
-    done by _wire_intrinsics + ALL_INTRINSICS — this hook does the runtime
+    done by _wire_intrinsics + builtin_tools — this hook does the runtime
     setup that the registry can't: create the manager and wire it into the
     agent so module-level handle() can find it.
 
@@ -111,3 +107,8 @@ def boot(agent) -> None:
     agent._email_manager = mgr
     agent._mailbox_name = "email box"
     agent._mailbox_tool = "email"
+
+register_generic_dismiss_guard(
+    "email",
+    "email(action='dismiss', email_id=[...]) or email(action='read', email_id=[...])",
+)

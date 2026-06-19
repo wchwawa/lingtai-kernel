@@ -16,7 +16,7 @@ bundle-execution pattern end to end against actual behavior.
 Where the real handler lives — and why the bridge lives here
 ------------------------------------------------------------
 ``mcp`` is a **wrapper capability** (like ``daemon`` and the file tools), not a
-kernel intrinsic. Its real handler is the closure ``lingtai.core.mcp.make_handler
+built-in tool. Its real handler is the closure ``lingtai.core.mcp.make_handler
 (agent)`` builds — the *same* closure ``mcp.setup()`` registers via
 ``agent.add_tool`` (single source of truth; see ``lingtai.core.mcp.make_handler``).
 The bridge reuses that *same* factory — there is no second implementation. The

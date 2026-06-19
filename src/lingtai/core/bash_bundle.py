@@ -15,7 +15,7 @@ actual behavior.
 Where the real handler lives — and why the bridge lives here
 ------------------------------------------------------------
 ``bash`` is a **wrapper capability** (like ``daemon``, ``mcp``, and the file
-tools), not a kernel intrinsic. Its real handler is the ``handle`` method of a
+tools), not a built-in tool. Its real handler is the ``handle`` method of a
 :class:`~lingtai.core.bash.BashManager` built by ``lingtai.core.bash.make_handler
 (agent)`` — the *same* manager/handler ``bash.setup()`` registers via
 ``agent.add_tool`` (single source of truth; see ``lingtai.core.bash.make_manager``

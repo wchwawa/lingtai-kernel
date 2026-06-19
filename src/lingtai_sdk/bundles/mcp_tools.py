@@ -21,7 +21,7 @@ Carrier and host class — consistent with the live wiring
 --------------------------------------------------------
 ``mcp`` is a **wrapper capability** registered live by its ``setup()`` through
 ``agent.add_tool`` — the *same* non-native, in-process registration path the file
-tools and ``daemon`` use, **not** a kernel intrinsic. So, like ``daemon`` (and
+tools and ``daemon`` use, **not** a built-in tool. So, like ``daemon`` (and
 unlike the native-carried ``email`` / ``system``), it declares ``in_process``
 transport + ``privileged=False`` and is hosted by the non-native
 :class:`~lingtai_sdk.capability_host.BundleHost`, mirroring how the live ``setup()``

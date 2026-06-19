@@ -32,7 +32,7 @@ an LLM consultation and persist state from a lighter notification dismiss. The
 conservative, faithful encoding is: keep the **bundle-level posture at ``caution``**
 (what the stage-8 manifest and the stage-17 guard bridge already derive — the
 strongest soul action *is* ``caution``), and ship the **graded action table as
-metadata**. The grading mirrors the side effects the real kernel intrinsic
+metadata**. The grading mirrors the side effects the real built-in tool
 performs in code (``intrinsics.soul.__init__.handle`` dispatch); it is a
 *declaration of* that posture, never a second gate. Like every stage-3 risk
 helper, the lookup fails safe **high** (an unknown action grades ``DESTRUCTIVE``).
@@ -40,8 +40,8 @@ helper, the lookup fails safe **high** (an unknown action grades ``DESTRUCTIVE``
 What this module is NOT
 -----------------------
 Exactly as in stages 3A/3B/3C/8, it does **not** migrate, move, rewrite, import,
-or call the real ``soul`` implementation. The real handler is a *kernel intrinsic*
-(``lingtai.kernel.intrinsics.soul.handle(agent, args)``), wired live by
+or call the real ``soul`` implementation. The real handler is a *built-in tool*
+(``lingtai.core.soul.handle(agent, args)``), wired live by
 ``BaseAgent._wire_intrinsics``; importing it here would break SDK import-purity
 and is unnecessary — this module ships *declarations + an injection seam* only.
 The wrapper-side bridge that supplies the handler lives in
@@ -67,7 +67,7 @@ SOUL_TOOL_NAME = "soul"
 
 #: Per-action danger grading for the single ``soul`` tool's ``action``
 #: discriminator. This is the conservative, faithful encoding of the side effects
-#: the real kernel intrinsic performs in code (``intrinsics.soul.__init__.handle``):
+#: the real built-in tool performs in code (``intrinsics.soul.__init__.handle``):
 #:
 #: * **LLM consultation + persisted state** (``CAUTION``) — ``inquiry`` runs a
 #:   synchronous mirror-session LLM call and persists the result to
@@ -164,7 +164,7 @@ def soul_voice_host(handler: ToolHandler) -> NativeBundleHost:
     handlers for *all three* core bundles together — this seam hosts ``soul``
     alone, so the wrapper bridge can adopt the inner-voice surface incrementally
     without supplying ``system`` / ``psyche``. The handler is whatever the wrapper
-    bridge injects (the real kernel intrinsic ``soul.handle`` bound to an agent);
+    bridge injects (the real built-in tool ``soul.handle`` bound to an agent);
     this shim never imports or calls the real implementation, and
     ``native_core_host`` enforces the manifest/handler/native-authority contract.
 
@@ -173,7 +173,7 @@ def soul_voice_host(handler: ToolHandler) -> NativeBundleHost:
     whatever handler it is given. Danger is a *declaration* the stage-17
     :mod:`lingtai_sdk.guard_bridge` reads — a separate, not-installed seam. Note
     the real in-flight gate for ``flow`` (``agent._soul_fire_lock``) lives in the
-    kernel intrinsic, not in this host.
+    built-in tool, not in this host.
     """
     if not callable(handler):
         raise BundleHostError(

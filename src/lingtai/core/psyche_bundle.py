@@ -10,8 +10,8 @@ against actual behavior.
 
 Where the real handler lives — and why the bridge lives here
 ------------------------------------------------------------
-Exactly like ``system``, ``psyche`` is a **kernel intrinsic**:
-``lingtai.kernel.intrinsics.psyche.handle(agent, args)``. The kernel wires it live
+Exactly like ``system``, ``psyche`` is a **built-in tool**:
+``lingtai.core.psyche.handle(agent, args)``. The kernel wires it live
 in ``BaseAgent._wire_intrinsics`` as ``self._intrinsics["psyche"] =
 lambda args: psyche.handle(self, args)`` — that closure is the live registration
 path, and it is **left untouched** by this stage.
@@ -22,11 +22,11 @@ intrinsic the kernel dispatches, against the same ``agent`` state (``system/``
 files, ``history/`` snapshots, the molt machinery, the notification surface). The
 bridge lives in the wrapper — not the kernel — because the dependency direction is
 one-way: the wrapper *may* import the SDK (``lingtai_sdk.psyche_tools``) and the
-kernel intrinsic; the **kernel must never import the SDK**. Putting the SDK import
+built-in tool; the **kernel must never import the SDK**. Putting the SDK import
 here (lazily, inside the bridge functions) preserves that.
 
 The wrapper bundle host (``NativeBundleHost``) invokes its handler with keyword
-args; the kernel intrinsic ``handle`` takes a single ``args: dict``. The tiny
+args; the built-in tool ``handle`` takes a single ``args: dict``. The tiny
 ``_kwargs_adapter`` reconciles the two without changing either contract — the
 identical adapter ``system_bundle`` uses.
 
@@ -48,21 +48,21 @@ if TYPE_CHECKING:
     from lingtai.kernel.base_agent import BaseAgent
     from lingtai_sdk.bundles.host import NativeBundleHost
 
-# The single source of truth for ``psyche`` behavior — the kernel intrinsic the
+# The single source of truth for ``psyche`` behavior — the built-in tool the
 # live ``_wire_intrinsics`` path also dispatches. Imported at wrapper module load
-# (the wrapper may import the kernel intrinsic surface); the SDK is imported
+# (the wrapper may import the built-in tool surface); the SDK is imported
 # lazily inside the bridge functions to preserve the wrapper→sdk import edge.
-from lingtai.kernel.intrinsics import psyche as _psyche
+import lingtai.core.psyche as _psyche
 
 
 def _kwargs_adapter(
     handler: Callable[["BaseAgent", dict], Any],
     agent: "BaseAgent",
 ) -> Callable[..., Any]:
-    """Adapt the kernel intrinsic ``handle(agent, args)`` to host kwargs invocation.
+    """Adapt the built-in tool ``handle(agent, args)`` to host kwargs invocation.
 
     ``NativeBundleHost.invoke(tool, **kwargs)`` calls its handler with keyword
-    args, but the kernel intrinsic ``psyche.handle`` takes ``(agent, args: dict)``.
+    args, but the built-in tool ``psyche.handle`` takes ``(agent, args: dict)``.
     This binds *agent* and collects the kwargs back into the ``args`` dict so the
     real intrinsic runs unchanged — the identity/context mirror of the adapter
     ``lingtai.core.system_bundle`` uses for the system handler.
@@ -77,7 +77,7 @@ def _kwargs_adapter(
 def psyche_identity_handler(agent: "BaseAgent") -> Callable[..., Any]:
     """Build the kwargs-handler the SDK ``psyche`` host seam expects.
 
-    The handler is the kernel intrinsic ``psyche.handle`` — the *same* function
+    The handler is the built-in tool ``psyche.handle`` — the *same* function
     ``BaseAgent._wire_intrinsics`` wires live — bound to *agent* and adapted to the
     host's keyword-args invocation contract. Bound to *agent*, so it reads/writes
     through ``agent._working_dir`` (``system/`` + ``history/``) and the molt /
@@ -91,7 +91,7 @@ def psyche_identity_bundle_host(agent: "BaseAgent") -> "NativeBundleHost":
 
     Returns a single :class:`~lingtai_sdk.capability_host.NativeBundleHost` for
     ``psyche``, hosting the bundle's one declared tool with the wrapper's genuine
-    handler (the kernel intrinsic, bound to *agent*). The SDK is imported here, in
+    handler (the built-in tool, bound to *agent*). The SDK is imported here, in
     the wrapper, not at SDK module load — preserving the one-way ``wrapper -> sdk``
     direction.
 

@@ -120,7 +120,7 @@ class TestNotificationPersistenceAgentMolt:
             mock_interface = _setup_mock_chat(agent)
 
             # Build a fake ToolCallBlock for the molt
-            from lingtai.kernel.intrinsics.psyche._molt import _context_molt
+            from lingtai.core.psyche._molt import _context_molt
             from lingtai.kernel.llm.interface import ToolCallBlock
             tc_id = "toolu_test_123"
             tc_block = ToolCallBlock(
@@ -179,7 +179,7 @@ class TestNotificationPersistenceAgentMolt:
             # Set up mock chat
             mock_interface = _setup_mock_chat(agent)
 
-            from lingtai.kernel.intrinsics.psyche._molt import _context_molt
+            from lingtai.core.psyche._molt import _context_molt
             from lingtai.kernel.llm.interface import ToolCallBlock
 
             tc_id = "toolu_test_456"
@@ -223,7 +223,7 @@ class TestNotificationPersistenceForceWipe:
             _setup_mock_chat(agent)
 
             # Perform system-initiated force molt
-            from lingtai.kernel.intrinsics.psyche._molt import context_forget
+            from lingtai.core.psyche._molt import context_forget
             result = context_forget(agent, source="warning_ladder")
 
             # Force molt should succeed
@@ -255,7 +255,7 @@ class TestNotificationPersistenceForceWipe:
 
             _setup_mock_chat(agent)
 
-            from lingtai.kernel.intrinsics.psyche._molt import context_forget
+            from lingtai.core.psyche._molt import context_forget
             result = context_forget(agent, source="aed", attempts=3)
 
             assert result.get("status") == "ok"
@@ -297,7 +297,7 @@ class TestNotificationTrackingStateAfterMolt:
             # Set up mock chat
             mock_interface = _setup_mock_chat(agent)
 
-            from lingtai.kernel.intrinsics.psyche._molt import _context_molt
+            from lingtai.core.psyche._molt import _context_molt
             from lingtai.kernel.llm.interface import ToolCallBlock
 
             tc_id = "toolu_test_789"
@@ -361,7 +361,7 @@ class TestNotificationTrackingStateAfterMolt:
             # Set up mock chat
             _setup_mock_chat(agent)
 
-            from lingtai.kernel.intrinsics.psyche._molt import context_forget
+            from lingtai.core.psyche._molt import context_forget
             result = context_forget(agent, source="warning_ladder")
 
             assert result.get("status") == "ok"

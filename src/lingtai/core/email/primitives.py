@@ -12,7 +12,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ...i18n import t
+from lingtai.kernel.i18n import t
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +349,8 @@ def _render_unread_digest(agent, *, max_entries: int = 10, preview_chars: int = 
     Caller uses ``count`` to short-circuit (don't enqueue when 0) and
     ``newest_received_at`` for the call_block args.
     """
-    from ...i18n import t as _t
-    from ...time_veil import veil
+    from lingtai.kernel.i18n import t as _t
+    from lingtai.kernel.time_veil import veil
 
     read_ids = _read_ids(agent)
     inbox = _list_inbox(agent)  # already newest-first per existing semantics

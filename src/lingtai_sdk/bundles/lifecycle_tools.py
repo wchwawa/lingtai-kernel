@@ -40,28 +40,28 @@ encoding is therefore: keep the **bundle-level posture at its strongest action**
 (``destructive`` — what the stage-17 guard bridge already derives), and ship the
 **graded action table as metadata** so a host that wants finer-than-bundle
 grading can read it *without* any live runtime gate. The grading mirrors the
-authority the real kernel intrinsic already enforces in code
-(``lingtai.kernel.intrinsics.system.karma._KARMA_ACTIONS`` /
+authority the real built-in tool already enforces in code
+(``lingtai.core.system.karma._KARMA_ACTIONS`` /
 ``_NIRVANA_ACTIONS``); it is a *declaration of* that posture, never a second
 gate.
 
 What this module is NOT
 -----------------------
 Exactly as in stages 3A/3B/8, it does **not** migrate, move, rewrite, import, or
-call the real ``system`` implementation. The real handler is a *kernel intrinsic*
-(``lingtai.kernel.intrinsics.system.handle(agent, args)``), wired live by
+call the real ``system`` implementation. The real handler is a *built-in tool*
+(``lingtai.core.system.handle(agent, args)``), wired live by
 ``BaseAgent._wire_intrinsics``; importing it here would break SDK import-purity
-(the SDK must not eagerly pull the kernel intrinsic surface) and is unnecessary —
+(the SDK must not eagerly pull the built-in tool surface) and is unnecessary —
 this module ships *declarations + an injection seam* only:
 
     system manifest (core_bundles.system_bundle)
        -> system_lifecycle_host(handler)   # wrapper injects the real intrinsic handler
-       -> host.invoke("system", **args)     # runs the kernel intrinsic's existing dispatch
+       -> host.invoke("system", **args)     # runs the built-in tool's existing dispatch
 
 The wrapper-side bridge that supplies that handler lives in
 ``lingtai.core.system_bundle`` (the wrapper *may* import the SDK and the kernel
 intrinsic; the SDK must not import either). The tool **schema and behavior are
-unchanged**: the bridge reuses the kernel intrinsic's existing ``handle`` /
+unchanged**: the bridge reuses the built-in tool's existing ``handle`` /
 ``get_schema`` verbatim, and the live ``_wire_intrinsics`` registration path is
 untouched.
 
@@ -85,8 +85,8 @@ SYSTEM_TOOL_NAME = "system"
 
 #: Per-action danger grading for the single ``system`` tool's ``action``
 #: discriminator. This is the conservative, faithful encoding of the risk the
-#: real kernel intrinsic already enforces in code
-#: (``intrinsics.system.karma._KARMA_ACTIONS`` / ``_NIRVANA_ACTIONS``):
+#: real built-in tool already enforces in code
+#: (``core.system.karma._KARMA_ACTIONS`` / ``_NIRVANA_ACTIONS``):
 #:
 #: * **self / normal lifecycle** (``SAFE`` / ``CAUTION``) — no inter-agent
 #:   authority. ``refresh`` reloads *self* config/MCP and restarts the loop;
@@ -124,7 +124,7 @@ SYSTEM_ACTION_RISK: dict[str, SecurityDanger] = {
 }
 
 #: The karma-gated (privileged inter-agent) actions — a declaration mirroring
-#: ``intrinsics.system.karma._KARMA_ACTIONS``. Acting on another agent's runtime
+#: ``core.system.karma._KARMA_ACTIONS``. Acting on another agent's runtime
 #: requires ``admin.karma=True`` at live dispatch (enforced by the kernel, not
 #: here).
 KARMA_ACTIONS: frozenset[str] = frozenset(
@@ -132,7 +132,7 @@ KARMA_ACTIONS: frozenset[str] = frozenset(
 )
 
 #: The nirvana-gated (irreversible teardown) actions — a declaration mirroring
-#: ``intrinsics.system.karma._NIRVANA_ACTIONS``. Requires both
+#: ``core.system.karma._NIRVANA_ACTIONS``. Requires both
 #: ``admin.karma=True`` and ``admin.nirvana=True`` at live dispatch.
 NIRVANA_ACTIONS: frozenset[str] = frozenset({"nirvana"})
 
@@ -192,7 +192,7 @@ def system_lifecycle_host(handler: ToolHandler) -> NativeBundleHost:
     handlers for *all three* core bundles (``system`` / ``psyche`` / ``soul``)
     together — this seam hosts ``system`` alone, so the wrapper bridge can adopt
     the lifecycle surface incrementally without supplying the other two. The
-    handler is whatever the wrapper bridge injects (the real kernel intrinsic
+    handler is whatever the wrapper bridge injects (the real built-in tool
     ``system.handle`` bound to an agent); this shim never imports or calls the
     real implementation, and ``native_core_host`` enforces the
     manifest/handler/native-authority contract.
@@ -202,7 +202,7 @@ def system_lifecycle_host(handler: ToolHandler) -> NativeBundleHost:
     whatever handler it is given. Danger is a *declaration* the stage-17
     :mod:`lingtai_sdk.guard_bridge` reads to gate dispatch — a separate,
     not-installed seam — and the real per-action authority gate
-    (karma / nirvana) lives in the kernel intrinsic, not in this host.
+    (karma / nirvana) lives in the built-in tool, not in this host.
     """
     if not callable(handler):
         raise BundleHostError(

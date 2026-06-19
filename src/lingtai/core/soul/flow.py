@@ -54,8 +54,8 @@ def _soul_whisper(agent) -> None:
     consultation. This ensures messages are seen within one soul delay
     cycle instead of waiting indefinitely.
     """
-    from ...state import AgentState
-    from ...notifications import notification_fingerprint, collect_notifications
+    from lingtai.kernel.state import AgentState
+    from lingtai.kernel.notifications import notification_fingerprint, collect_notifications
 
     agent._soul_timer = None
     try:
@@ -115,7 +115,7 @@ def _append_soul_flow_record(agent, record: dict) -> None:
 
 def _flatten_v3_for_pair(agent, voice: dict) -> dict:
     """Bridge v3 consultation blocks to the legacy appendix renderer."""
-    from ...llm.interface import TextBlock, ThinkingBlock, ToolCallBlock
+    from lingtai.kernel.llm.interface import TextBlock, ThinkingBlock, ToolCallBlock
 
     voice_text_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -192,7 +192,6 @@ def _run_consultation_fire(agent) -> None:
     """
     from datetime import datetime, timezone
     import secrets as _secrets
-    from ...message import _make_message, MSG_TC_WAKE
 
     state = agent._state
     state_val = state.value if hasattr(state, "value") else str(state)
@@ -214,7 +213,6 @@ def _run_consultation_fire(agent) -> None:
         from .consultation import (
             _render_current_diary,
             _run_consultation_batch,
-            build_consultation_pair,
         )
         from ..system import publish_notification, clear_notification
 
@@ -378,7 +376,7 @@ def _rehydrate_appendix_tracking(agent) -> None:
         iface = agent._chat.interface
     except Exception:
         return
-    from ...llm.interface import ToolCallBlock, ToolResultBlock
+    from lingtai.kernel.llm.interface import ToolCallBlock, ToolResultBlock
     entries = iface.entries
     for i in range(len(entries) - 1):
         a = entries[i]

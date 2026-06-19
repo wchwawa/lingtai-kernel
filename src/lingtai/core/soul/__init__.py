@@ -21,7 +21,7 @@ Three actions:
 from __future__ import annotations
 
 # Re-export constants from config.py
-from .config import (
+from .config import (  # noqa: F401
     SOUL_DELAY_MIN_SECONDS,
     CONSULTATION_PAST_COUNT_MIN,
     CONSULTATION_PAST_COUNT_MAX,
@@ -30,7 +30,7 @@ from .config import (
 )
 
 # Re-export private helpers consumed by base_agent.py and tests
-from .config import (
+from .config import (  # noqa: F401
     _handle_config,
     _handle_voice,
     _persist_soul_config,
@@ -40,7 +40,7 @@ from .config import (
 )
 
 # Re-export consultation pipeline
-from .consultation import (
+from .consultation import (  # noqa: F401
     _build_consultation_tool_refusal,
     _CONSULTATION_MAX_ROUNDS,
     _DIARY_CUE_TOKEN_CAP,
@@ -58,26 +58,28 @@ from .consultation import (
 )
 
 # Re-export inquiry
-from .inquiry import soul_inquiry, _run_inquiry
+from .inquiry import soul_inquiry, _run_inquiry  # noqa: F401
 
 # Re-export flow (soul cadence, fire, persistence, appendix tracking)
-from .flow import (
+from .flow import (  # noqa: F401
     _start_soul_timer,
     _cancel_soul_timer,
     _soul_whisper,
     _persist_soul_entry,
+    _append_soul_flow_record,
+    _flatten_v3_for_pair,
     _run_consultation_fire,
     _rehydrate_appendix_tracking,
 )
 
 
 def get_description(lang: str = "en") -> str:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return t(lang, "soul.description")
 
 
 def get_schema(lang: str = "en") -> dict:
-    from ...i18n import t
+    from lingtai.kernel.i18n import t
     return {
         "type": "object",
         "properties": {
@@ -199,7 +201,7 @@ def handle(agent, args: dict) -> dict:
         return _handle_voice(agent, args)
 
     if action == "dismiss":
-        from ...notifications import dismiss_channel
+        from lingtai.kernel.notifications import dismiss_channel
         result = dismiss_channel(agent, "soul", invoked_by="soul")
         if result.get("status") == "ok":
             result.setdefault("message", "Soul flow notification dismissed.")

@@ -244,7 +244,7 @@ class TestSelfSleep:
     def test_self_sleep_no_karma_required(self, tmp_path):
         """Any agent can self-sleep to ASLEEP without admin.karma."""
         from lingtai.kernel import BaseAgent, AgentState
-        from lingtai.kernel.intrinsics.system import handle
+        from lingtai.core.system import handle
         agent = BaseAgent(
             service=make_mock_service(),
             agent_name="test",

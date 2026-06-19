@@ -45,7 +45,7 @@ from lingtai.kernel.tool_call_guard import ToolProposal
 
 # The real kernel intrinsic dispatch table — the source the SDK validity map
 # mirrors. Importing the kernel intrinsic here is allowed (kernel, not wrapper).
-from lingtai.kernel.intrinsics.psyche import _VALID_ACTIONS as _KERNEL_VALID_ACTIONS
+from lingtai.core.psyche import _VALID_ACTIONS as _KERNEL_VALID_ACTIONS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
