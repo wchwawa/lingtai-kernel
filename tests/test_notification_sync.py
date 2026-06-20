@@ -6,7 +6,7 @@ Covers the design's invariants and the patch's §13 test matrix:
 - §13.2 — IDLE-state pair injection / strip / no-op
 - §13.3 — ACTIVE-state deferral without ToolResultBlock mutation
 - §13.4 — ASLEEP-state wake on fingerprint change
-- §13.5 — voluntary `system(action="notification")` returns the dict
+- §13.5 — voluntary `notification(action="check")` returns the dict
 - §13.6 — producer migrations: email, soul, system
 - §13.7 — molt clearing
 
@@ -556,7 +556,7 @@ def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
 
     The synthesized ``(ToolCallBlock, ToolResultBlock)`` pair has
     already been spliced by ``_inject_notification_pair`` —
-    impersonating a voluntary ``system(action="notification")`` call
+    impersonating a voluntary ``notification(action="check")`` call
     from the agent's perspective.  ``MSG_TC_WAKE`` then unblocks the
     run loop so ``_handle_tc_wake`` drives one inference round off
     the existing wire, no fake user message and no meta prefix.
@@ -761,9 +761,12 @@ def test_sync_idle_injects_pair_with_synthesized_marker(tmp_path: Path) -> None:
     call_block = entries[0].content[0]
     result_block = entries[1].content[0]
     assert isinstance(call_block, ToolCallBlock)
-    assert call_block.name == "system"
-    assert call_block.args["action"] == "notification"
+    # The kernel-synthesized delivery pair impersonates a voluntary
+    # notification(action="check") read — not system(action="notification").
+    assert call_block.name == "notification"
+    assert call_block.args["action"] == "check"
     assert isinstance(result_block, ToolResultBlock)
+    assert result_block.name == "notification"
     assert result_block.synthesized is True
 
     body = result_block.content
@@ -1387,7 +1390,7 @@ def test_sync_asleep_inject_fail_falls_back_to_degraded_request(tmp_path: Path) 
     to ASLEEP without committing the fingerprint, so the next heartbeat
     saw the same .notification/ state, woke again, failed inject again,
     reverted again — forever. The fix wakes the agent via a degraded
-    request that tells it to call system(action="notification") or
+    request that tells it to call notification(action="check") or
     read the producer files directly.
     """
     from lingtai_kernel.state import AgentState

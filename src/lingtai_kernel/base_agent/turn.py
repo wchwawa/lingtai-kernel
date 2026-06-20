@@ -951,7 +951,7 @@ def _handle_tc_wake(agent, msg: Message) -> None:
     message after ``_sync_notifications`` has already spliced a
     synthesized ``(ToolCallBlock, ToolResultBlock)`` pair into the
     canonical interface (impersonating a voluntary
-    ``system(action="notification")`` call from the agent's
+    ``notification(action="check")`` call from the agent's
     perspective).  This handler's job is to drive the next inference
     round off that wire — no fake user message, no meta prefix.  From
     the LLM's viewpoint it is indistinguishable from the agent having
