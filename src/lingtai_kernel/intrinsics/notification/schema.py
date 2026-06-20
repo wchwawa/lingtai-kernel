@@ -1,9 +1,12 @@
 """Schema — tool registration for the standalone ``notification`` tool.
 
-The notification tool exposes only the notification-facing verbs.  Where a
-parameter is shared with the ``system`` tool (``channel``, ``force``,
-``event_id``, ``ref_id``, ``reason``, ``items``), the same i18n string is
-reused so the two tools describe identical behavior.
+The notification tool exposes only the notification-facing verbs: ``check``
+plus the three atomic dismiss verbs (``dismiss_channel``, ``dismiss_event``,
+``dismiss_ref``).  ``summarize`` is *not* here — it remains a ``system`` action.
+
+Where a parameter is shared in spirit with the ``system`` tool (``channel``,
+``force``, ``event_id``, ``ref_id``, ``reason``), a notification-owned i18n
+string is used so the notification tool documents its own behavior.
 """
 from __future__ import annotations
 
@@ -20,46 +23,28 @@ def get_schema(lang: str = "en") -> dict:
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["check", "dismiss", "summarize"],
+                "enum": ["check", "dismiss_channel", "dismiss_event", "dismiss_ref"],
                 "description": t(lang, "notification_tool.action_description"),
             },
             "channel": {
                 "type": "string",
-                "description": t(lang, "system_tool.channel_description"),
+                "description": t(lang, "notification_tool.channel_description"),
             },
             "force": {
                 "type": "boolean",
-                "description": t(lang, "system_tool.force_description"),
+                "description": t(lang, "notification_tool.force_description"),
             },
             "event_id": {
                 "type": "string",
-                "description": t(lang, "system_tool.event_id_description"),
+                "description": t(lang, "notification_tool.event_id_description"),
             },
             "ref_id": {
                 "type": "string",
-                "description": t(lang, "system_tool.ref_id_description"),
+                "description": t(lang, "notification_tool.ref_id_description"),
             },
             "reason": {
                 "type": "string",
-                "description": t(lang, "system_tool.reason_description"),
-            },
-            "items": {
-                "type": "array",
-                "description": t(lang, "system_tool.items_description"),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "tool_call_id": {
-                            "type": "string",
-                            "description": "The id of the prior tool-result block to summarize.",
-                        },
-                        "summary": {
-                            "type": "string",
-                            "description": "Your agent-authored summary of that tool result.",
-                        },
-                    },
-                    "required": ["tool_call_id", "summary"],
-                },
+                "description": t(lang, "notification_tool.reason_description"),
             },
         },
         "required": ["action"],

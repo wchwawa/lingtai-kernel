@@ -174,7 +174,7 @@ def _publish_tool_loop_guard_notification(
                 "from those blocked calls. Do not re-issue the same blocked "
                 "tool call(s) unchanged. Continue with a different approach, "
                 "summarize the blocked/completed work, or ask the human for "
-                "direction, then dismiss with system(action='dismiss', "
+                "direction, then dismiss with notification(action='dismiss_channel', "
                 "channel='tool_loop_guard', reason='handled')."
             ),
             data={

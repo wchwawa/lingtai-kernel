@@ -187,7 +187,7 @@ def build_notification_payload(notifications: dict) -> dict:
         "If a human is waiting and the next step may take time, acknowledge "
         "with the communication tool directly before the long-running tool."
         " After handling, dismiss the notification and end your turn"
-        " — do not call system(action='notification') voluntarily."
+        " — do not call notification(action='check') voluntarily."
     )
 
     notifications_with_guidance: dict = {}

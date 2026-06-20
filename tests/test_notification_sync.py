@@ -160,14 +160,17 @@ def test_concurrent_publish_atomicity(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# §13.5 — `system(action="notification")` voluntary call
+# §13.5 — `notification(action="check")` voluntary call
+#
+# The read verb moved off `system` onto the standalone `notification` tool.
+# `system(action="notification")` is no longer a valid action.
 # ---------------------------------------------------------------------------
 
 
-def test_notification_action_returns_empty_when_nothing_published(
+def test_check_action_returns_empty_when_nothing_published(
     tmp_path: Path,
 ) -> None:
-    from lingtai_kernel.intrinsics.system import handle
+    from lingtai_kernel.intrinsics.notification import handle
 
     @dataclass
     class _Stub:
@@ -177,7 +180,7 @@ def test_notification_action_returns_empty_when_nothing_published(
         def _log(self, evt: str, **fields: Any) -> None:
             self._logs.append((evt, fields))
 
-    res = handle(_Stub(), {"action": "notification"})
+    res = handle(_Stub(), {"action": "check"})
     # Voluntary call returns a placeholder dict — the live notification
     # payload (if any) is stamped on by the turn loop's meta-block hook,
     # never built by the handler itself. So even with nothing published,
@@ -189,8 +192,8 @@ def test_notification_action_returns_empty_when_nothing_published(
     assert "notification" in res["message"].lower()
 
 
-def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
-    from lingtai_kernel.intrinsics.system import handle
+def test_check_action_returns_placeholder(tmp_path: Path) -> None:
+    from lingtai_kernel.intrinsics.notification import handle
 
     publish(tmp_path, "email", {"count": 5, "newest_received_at": "2026-05-05T00:00:00Z"})
     publish(tmp_path, "soul", {"voices": [{"source": "warmth", "voice": "..."}]})
@@ -203,7 +206,7 @@ def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
         def _log(self, evt: str, **fields: Any) -> None:
             self._logs.append((evt, fields))
 
-    res = handle(_Stub(), {"action": "notification"})
+    res = handle(_Stub(), {"action": "check"})
     # Handler returns a placeholder only — channel keys MUST NOT appear
     # here. The canonical `notifications` payload is attached later by
     # `attach_active_notifications`, not by this handler. This guarantees
@@ -213,6 +216,23 @@ def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
     assert "soul" not in res
     assert "notifications" not in res
     assert "_notification_guidance" not in res
+
+
+def test_system_notification_action_is_removed(tmp_path: Path) -> None:
+    """system(action="notification") is no longer a valid action."""
+    from lingtai_kernel.intrinsics.system import handle
+
+    @dataclass
+    class _Stub:
+        _working_dir: Path = tmp_path
+        _logs: list[tuple[str, dict]] = field(default_factory=list)
+
+        def _log(self, evt: str, **fields: Any) -> None:
+            self._logs.append((evt, fields))
+
+    res = handle(_Stub(), {"action": "notification"})
+    assert res["status"] == "error"
+    assert "Unknown system action" in res["message"]
 
 
 # ---------------------------------------------------------------------------

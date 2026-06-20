@@ -1112,7 +1112,7 @@ class BaseAgent:
                     "[system] Notification delivery could not be injected onto "
                     f"the wire after a heal attempt. Affected source(s): "
                     f"{', '.join(sources)}. Please query the current state by "
-                    "calling system(action=\"notification\") or read the "
+                    "calling notification(action=\"check\") or read the "
                     "producer files under .notification/ directly, then decide "
                     "whether to act. The kernel will not retry this delivery "
                     "until the on-disk state changes."
@@ -1931,9 +1931,9 @@ class BaseAgent:
             f"(b) tolerate these repeated reminders until you update the persistent config and refresh."
         )
         _dismiss_policy = (
-            "Dismiss policy: system(action='dismiss') — including force, "
-            "event_id, or ref_id — cannot clear or bypass large-result "
-            "reminders; only a successful system(action='summarize') of the "
+            "Dismiss policy: no notification action — notification(action='dismiss_channel'/"
+            "'dismiss_event'/'dismiss_ref'), including force — can clear or bypass "
+            "large-result reminders; only a successful system(action='summarize') of the "
             "matching tool_call_id clears the reminder automatically."
         )
         if is_spill and spill_path:
