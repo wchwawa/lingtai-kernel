@@ -41,6 +41,6 @@ it remains a `system` action (context hygiene, not a notification verb).
 
 ## Notes
 
-- **No `system` compatibility:** `system(action="notification"|"dismiss")` no longer exist. The notification tool is the sole agent-callable surface for these verbs. The kernel still *synthesizes* a notification delivery tool-call pair (internally named `system`) for IDLE/ASLEEP delivery — that is kernel plumbing, not an agent-callable operation.
+- **No `system` compatibility:** `system(action="notification"|"dismiss")` no longer exist. The notification tool is the sole agent-callable surface for these verbs. The kernel still *synthesizes* a notification delivery tool-call pair for IDLE/ASLEEP delivery — now shaped as `notification(action="check")` (`base_agent/__init__.py:1369-1382`), byte-shape-identical to a voluntary `check` so the LLM cannot tell a kernel-injected read from one it issued; the `_synthesized: true` body flag is the only marker. That synthesis is kernel plumbing, not an agent-callable operation.
 - **Atomic, not aggregate:** dismissal is split by target (`channel` / `event_id` / `ref_id`) so the API states exactly what is being cleared. `dismiss_channel` refuses `event_id`/`ref_id`; `dismiss_event`/`dismiss_ref` require their target id.
 - **No `force` backdoor:** `large_tool_result` reminders cannot be cleared by any atomic action — `dismiss_channel`/`dismiss_event`/`dismiss_ref`, with or without `force`. The only clear path is a successful `system(action="summarize")`. Regression-anchored by `tests/test_notification_tool.py`.

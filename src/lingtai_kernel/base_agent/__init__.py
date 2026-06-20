@@ -1003,7 +1003,7 @@ class BaseAgent:
         3. Otherwise, inject a new block appropriate for current state:
 
            * IDLE → splice ``(call, result)`` pair (impersonates a
-             voluntary ``system(action="notification")`` call from the
+             voluntary ``notification(action="check")`` call from the
              agent's perspective), post ``MSG_TC_WAKE`` so the run loop
              unblocks and ``_handle_tc_wake`` drives the next inference
              round off the existing wire — no fake user input, no meta
@@ -1059,7 +1059,7 @@ class BaseAgent:
         if self._state == AgentState.ASLEEP:
             # Notification arrival wakes the agent, then inject as IDLE.
             # The synthesized (call, result) pair impersonates a
-            # voluntary system(action="notification") call; MSG_TC_WAKE
+            # voluntary notification(action="check") call; MSG_TC_WAKE
             # unblocks the run loop so _handle_tc_wake drives one
             # inference round off the existing wire (no fake user
             # input, no meta prefix).
@@ -1222,9 +1222,14 @@ class BaseAgent:
     def _inject_notification_pair(self, notifications: dict) -> bool:
         """Inject a synthetic (call, result) pair for IDLE / ASLEEP states.
 
-        Builds ``system(action="notification")`` / ``<JSON dict>`` and
+        Builds ``notification(action="check")`` / ``<JSON dict>`` and
         appends to the wire interface.  Records the call_id for later
         stripping.
+
+        The synthesized pair is byte-shape-identical to a voluntary
+        ``notification(action="check")`` read so the LLM cannot distinguish
+        a kernel-injected delivery from one it issued itself; the
+        ``_synthesized: true`` body flag remains the only marker.
 
         The assistant turn carries only the synthetic ``ToolCallBlock``.
         The model-visible notification details and guidance live in the
@@ -1356,22 +1361,22 @@ class BaseAgent:
 
         # ``summary_text`` is log-only.  Do not place it in a TextBlock on the
         # wire: successful notification sync should be a structured
-        # system(action="notification") call/result pair, not a visible
+        # notification(action="check") call/result pair, not a visible
         # synthesized diary/text-input row.
         # call.args carries injection_seq only — real tool calls don't have
         # current_time/context/stamina in their args (those live in results).
         # The seq is enough to defeat byte-equality on the assistant turn.
         call_block = ToolCallBlock(
             id=call_id,
-            name="system",
+            name="notification",
             args={
-                "action": "notification",
+                "action": "check",
                 "injection_seq": self._notification_inject_seq,
             },
         )
         result_block = ToolResultBlock(
             id=call_id,
-            name="system",
+            name="notification",
             content=content_dict,  # dict, not JSON string — mutable for skeletonization
             synthesized=True,
         )
