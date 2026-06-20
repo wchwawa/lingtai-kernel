@@ -705,3 +705,54 @@ def test_rescan_spill_body_no_raise_disable_threshold_wording():
     assert "raise or disable the threshold" not in body, (
         "spill rescan body must not say 'raise or disable the threshold'"
     )
+
+
+# ---------------------------------------------------------------------------
+# 13. Rescan body wording: summarize clears the reminder; dismiss cannot bypass
+# ---------------------------------------------------------------------------
+
+
+def test_rescan_body_says_dismiss_cannot_bypass():
+    """Rescan body must say cleanup is background hygiene and dismiss cannot bypass it."""
+    iface = ChatInterface()
+    _add_tool_pair(iface, "tc-dismiss-wording", "bash", "X" * 55_000)  # >50000 alone
+    agent = _make_stub_agent(iface)
+    agent._summarize_notification_threshold = 5000
+
+    _rescan_large_tool_results(agent)
+    body = next(
+        p["body"].lower() for p in agent._published
+        if p["ref_id"] == "large_tool_result:tc-dismiss-wording"
+    )
+    assert "large-result cleanup is background context hygiene" in body
+    assert "handle the human first" in body
+    assert "dismiss" in body
+    assert "cannot" in body
+    assert "summarize" in body
+    assert "force" in body
+
+
+def test_rescan_spill_body_says_dismiss_cannot_bypass():
+    """Spill rescan body must also carry the background-hygiene/dismiss policy wording."""
+    iface = ChatInterface()
+    spill = {
+        "artifact": ARTIFACT_MARKER,
+        "status": "spilled",
+        "spill_path": "tmp/tool-results/dismiss-wording.txt",
+        "cap_chars": 100_000,
+        "original_char_count": 55_000,
+    }
+    _add_tool_pair(iface, "tc-spill-dismiss", "bash", spill)
+    agent = _make_stub_agent(iface)
+    agent._summarize_notification_threshold = 5000
+
+    _rescan_large_tool_results(agent)
+    body = next(
+        p["body"].lower() for p in agent._published
+        if p["ref_id"] == "large_tool_result:tc-spill-dismiss"
+    )
+    assert "large-result cleanup is background context hygiene" in body
+    assert "handle the human first" in body
+    assert "dismiss" in body
+    assert "cannot" in body
+    assert "summarize" in body

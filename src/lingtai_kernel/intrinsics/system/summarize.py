@@ -117,6 +117,7 @@ def _summarize(agent, args: dict) -> dict:
     item_results: list[dict] = []
     summarized_count = 0
     failed_count = 0
+    summarized_ids: list[str] = []
 
     now_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -237,6 +238,7 @@ def _summarize(agent, args: dict) -> dict:
             "original_visible_chars": original_visible_len,
         })
         summarized_count += 1
+        summarized_ids.append(tool_call_id)
 
     # Persist history so summarization survives refresh/molt.
     if summarized_count > 0:
@@ -251,11 +253,33 @@ def _summarize(agent, args: dict) -> dict:
                     error=str(exc),
                 )
 
+    # A successful summarize is the sanctioned discharge path for the
+    # matching large-result reminder: clear it automatically.  Generic
+    # dismiss refuses these reminders, so this is the only way they go away.
+    cleared_reminder_ref_ids: list[str] = []
+    if summarized_ids and getattr(agent, "_working_dir", None) is not None:
+        try:
+            from ...notifications import clear_large_result_reminders
+            cleared_reminder_ref_ids = clear_large_result_reminders(
+                agent, summarized_ids
+            )
+        except Exception as exc:
+            # Non-fatal: summarization already applied; the rescan/dedup
+            # logic will reconcile the reminder on a later turn.
+            try:
+                agent._log(
+                    "large_result_reminder_clear_failed",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+
     overall_status = "ok" if failed_count == 0 else ("partial" if summarized_count > 0 else "error")
     return {
         "status": overall_status,
         "summarized": summarized_count,
         "failed": failed_count,
         "items": item_results,
+        "cleared_reminders": cleared_reminder_ref_ids,
         "notification_threshold_chars": current_threshold,
     }

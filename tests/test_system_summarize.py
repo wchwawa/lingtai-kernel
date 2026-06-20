@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -467,9 +468,10 @@ def test_large_result_notification_threshold_in_text(tmp_path):
     assert len(published) == 1
     body = published[0]["body"]
     assert "7500" in body, f"threshold 7500 not found in notification body:\n{body}"
-    assert "Treat this notification as a prompt to act, not just FYI" in body
-    assert "summarize all pending large-result cases in one deliberate batch" in body
-    assert "otherwise the reminder will return until the result is summarized" in body
+    assert "Large-result cleanup is background context hygiene" in body
+    assert "handle the human first" in body
+    assert "successful summarize clears the reminder automatically" in body
+    assert "Do not repeatedly summarize cleanup metadata" in body
 
 
 def test_large_result_notification_not_fired_below_threshold(tmp_path):
@@ -586,9 +588,10 @@ def test_large_result_notification_spill_manifest_original_over_threshold(tmp_pa
     )
     body = published[0]["body"]
     assert "spill" in body.lower() or "sidecar" in body.lower()
-    assert "Treat this notification as a prompt to act, not just FYI" in body
-    assert "summarize all pending large-result cases in one deliberate batch" in body
-    assert "otherwise the reminder will return until the result is summarized" in body
+    assert "Large-result cleanup is background context hygiene" in body
+    assert "handle the human first" in body
+    assert "successful summarize clears the reminder automatically" in body
+    assert "Do not repeatedly summarize cleanup metadata" in body
 
 
 def test_large_result_notification_source_field(tmp_path):
@@ -820,9 +823,10 @@ def test_large_result_notification_spill_manifest_over_threshold(tmp_path):
     assert len(published) == 1
     body = published[0]["body"]
     assert "spill" in body.lower() or "sidecar" in body.lower()
-    assert "Treat this notification as a prompt to act, not just FYI" in body
-    assert "summarize all pending large-result cases in one deliberate batch" in body
-    assert "otherwise the reminder will return until the result is summarized" in body
+    assert "Large-result cleanup is background context hygiene" in body
+    assert "handle the human first" in body
+    assert "successful summarize clears the reminder automatically" in body
+    assert "Do not repeatedly summarize cleanup metadata" in body
     assert "toolu_spill_001" in body
     assert "60000" in body or "60,000" in body or "5000" in body
 
@@ -1040,6 +1044,60 @@ def test_large_result_notification_batch_digest_wording(tmp_path):
     assert "init" in body.lower() or "config" in body.lower() or "refresh" in body.lower(), (
         "notification body must mention init/config/refresh as the only way to change threshold"
     )
+
+
+# ---------------------------------------------------------------------------
+# Requirement #3: notification text — summarize clears, dismiss cannot bypass
+# ---------------------------------------------------------------------------
+
+
+def test_large_result_notification_body_says_dismiss_cannot_bypass(tmp_path):
+    """Plain large-result notification must say dismiss cannot clear it; summarize does."""
+    agent = _make_base_agent_for_notification(tmp_path)
+    agent._summarize_notification_threshold = 100
+    _stock_pending_large_results(agent, 1, size=51_000)
+
+    published = []
+    agent._enqueue_system_notification = MagicMock(
+        side_effect=lambda **kw: published.append(kw)
+    )
+
+    agent._maybe_notify_large_tool_result("bash", "X" * 200)
+    assert len(published) == 1
+    body = published[0]["body"].lower()
+    assert "dismiss" in body
+    assert "summarize" in body
+    # Must convey that summarize clears and dismiss/force cannot bypass.
+    assert "cannot" in body and "dismiss" in body
+    assert "force" in body
+
+
+def test_large_result_spill_notification_body_says_dismiss_cannot_bypass(tmp_path):
+    """Spill large-result notification must carry the same dismiss-cannot-bypass wording."""
+    from lingtai_kernel.tool_result_artifacts import ARTIFACT_MARKER
+
+    agent = _make_base_agent_for_notification(tmp_path)
+    agent._summarize_notification_threshold = 100
+    _stock_pending_large_results(agent, 1, size=51_000)
+
+    published = []
+    agent._enqueue_system_notification = MagicMock(
+        side_effect=lambda **kw: published.append(kw)
+    )
+
+    spill = {
+        "artifact": ARTIFACT_MARKER,
+        "status": "spilled",
+        "spill_path": "tmp/tool-results/foo.txt",
+        "cap_chars": 100,
+        "original_char_count": 55_000,
+    }
+    agent._maybe_notify_large_tool_result("bash", spill)
+    assert len(published) == 1
+    body = published[0]["body"].lower()
+    assert "dismiss" in body
+    assert "cannot" in body
+    assert "summarize" in body
     # Must mention batch-digesting or tolerating reminders
     assert "batch" in body.lower() or "all pending" in body.lower() or "tolerate" in body.lower(), (
         "notification body must mention batch-digest or tolerate-reminders guidance"
@@ -1176,3 +1234,205 @@ def test_base_agent_threshold_default_when_not_in_config(tmp_path):
 
     agent = BaseAgent(service=svc, agent_name="default-test", working_dir=tmp_path / "ag")
     assert agent._summarize_notification_threshold == 3000
+
+
+# ---------------------------------------------------------------------------
+# Requirement #2: successful summarize clears the matching large-result reminder
+# ---------------------------------------------------------------------------
+
+
+def _make_stub_agent_with_workdir(tmp_path, iface):
+    """Stub agent with a real working dir, lock, and chat session for reminder clears."""
+    workdir = tmp_path / "ag"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    class _StubChat:
+        interface = iface
+
+    agent = MagicMock()
+    agent._working_dir = workdir
+    agent._system_notification_lock = threading.Lock()
+    agent._chat = _StubChat()
+    agent._chat.interface = iface
+    agent._log = MagicMock()
+    agent._save_chat_history = MagicMock()
+    # Real attributes so clear_large_result_reminders can null them.
+    agent._pending_notification_meta = "stale"
+    agent._pending_notification_fp = (("system.json", 1, 2),)
+    return agent
+
+
+def _publish_large_result_event(workdir, tool_call_id, *, extra=None):
+    from lingtai_kernel.notifications import publish
+
+    events = []
+    if extra:
+        events.extend(extra)
+    events.append({
+        "event_id": f"evt_{tool_call_id}",
+        "source": "large_tool_result",
+        "ref_id": f"large_tool_result:{tool_call_id}",
+        "body": "summarize me",
+    })
+    publish(
+        workdir,
+        "system",
+        {
+            "header": f"{len(events)} system notifications",
+            "data": {"events": events},
+        },
+    )
+
+
+def test_summarize_clears_matching_large_result_reminder(tmp_path):
+    from lingtai_kernel.notifications import collect_notifications
+
+    iface = ChatInterface()
+    _add_tool_pair(iface, "toolu_big", "bash", "A" * 9000)
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    _publish_large_result_event(agent._working_dir, "toolu_big")
+
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [{"tool_call_id": "toolu_big", "summary": "digested"}],
+    })
+
+    assert result["status"] == "ok"
+    assert result["cleared_reminders"] == ["large_tool_result:toolu_big"]
+    # The reminder event is gone (file removed since it was the only event).
+    assert "system" not in collect_notifications(agent._working_dir)
+    # Pending notification caches invalidated.
+    assert agent._pending_notification_meta is None
+    assert agent._pending_notification_fp is None
+
+
+def test_summarize_clears_only_matching_reminder_preserves_others(tmp_path):
+    from lingtai_kernel.notifications import collect_notifications
+
+    iface = ChatInterface()
+    _add_tool_pair(iface, "toolu_big", "bash", "A" * 9000)
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    _publish_large_result_event(
+        agent._working_dir,
+        "toolu_big",
+        extra=[
+            {"event_id": "evt_other", "source": "daemon", "ref_id": "d", "body": "D"},
+            {
+                "event_id": "evt_keep",
+                "source": "large_tool_result",
+                "ref_id": "large_tool_result:toolu_other",
+                "body": "still pending",
+            },
+        ],
+    )
+
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [{"tool_call_id": "toolu_big", "summary": "digested"}],
+    })
+
+    assert result["status"] == "ok"
+    assert result["cleared_reminders"] == ["large_tool_result:toolu_big"]
+    events = collect_notifications(agent._working_dir)["system"]["data"]["events"]
+    ref_ids = {ev["ref_id"] for ev in events}
+    assert "large_tool_result:toolu_big" not in ref_ids
+    # Other daemon event and the OTHER pending large-result reminder are kept.
+    assert "d" in ref_ids
+    assert "large_tool_result:toolu_other" in ref_ids
+
+
+def test_summarize_batch_clears_each_matching_reminder(tmp_path):
+    from lingtai_kernel.notifications import collect_notifications
+
+    iface = ChatInterface()
+    _add_tool_pair(iface, "tc-A", "bash", "A" * 9000)
+    _add_tool_pair(iface, "tc-B", "read", "B" * 9000)
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    _publish_large_result_event(
+        agent._working_dir,
+        "tc-A",
+        extra=[{
+            "event_id": "evt_tc-B",
+            "source": "large_tool_result",
+            "ref_id": "large_tool_result:tc-B",
+            "body": "summarize me too",
+        }],
+    )
+
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [
+            {"tool_call_id": "tc-A", "summary": "A digest"},
+            {"tool_call_id": "tc-B", "summary": "B digest"},
+        ],
+    })
+
+    assert result["status"] == "ok"
+    assert set(result["cleared_reminders"]) == {
+        "large_tool_result:tc-A",
+        "large_tool_result:tc-B",
+    }
+    assert "system" not in collect_notifications(agent._working_dir)
+
+
+def test_summarize_failure_does_not_clear_reminder(tmp_path):
+    """A failed (not_found) summarize must NOT clear any reminder."""
+    from lingtai_kernel.notifications import collect_notifications
+
+    iface = ChatInterface()
+    # No tool pair for toolu_big — summarize will fail with not_found.
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    _publish_large_result_event(agent._working_dir, "toolu_big")
+
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [{"tool_call_id": "toolu_big", "summary": "digest"}],
+    })
+
+    assert result["status"] == "error"
+    assert result["cleared_reminders"] == []
+    events = collect_notifications(agent._working_dir)["system"]["data"]["events"]
+    assert any(ev["ref_id"] == "large_tool_result:toolu_big" for ev in events)
+
+
+def test_summarize_clear_is_noop_when_no_reminder_present(tmp_path):
+    """Summarize with no pending reminder still succeeds; cleared list is empty."""
+    iface = ChatInterface()
+    _add_tool_pair(iface, "toolu_big", "bash", "A" * 9000)
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    # No system.json published.
+
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [{"tool_call_id": "toolu_big", "summary": "digest"}],
+    })
+
+    assert result["status"] == "ok"
+    assert result["cleared_reminders"] == []
+
+
+def test_summarize_then_dismiss_is_unnecessary_end_to_end(tmp_path):
+    """End-to-end: dismiss is refused, but summarize clears the reminder."""
+    from lingtai_kernel.intrinsics import system as sys_intrinsic
+    from lingtai_kernel.notifications import collect_notifications, notification_fingerprint
+
+    iface = ChatInterface()
+    _add_tool_pair(iface, "toolu_big", "bash", "A" * 9000)
+    agent = _make_stub_agent_with_workdir(tmp_path, iface)
+    _publish_large_result_event(agent._working_dir, "toolu_big")
+    agent._notification_fp = notification_fingerprint(agent._working_dir)
+
+    # Dismiss is refused.
+    dismissed = sys_intrinsic._dismiss(agent, {"channel": "system", "force": True})
+    assert dismissed["status"] == "error"
+    assert dismissed["reason"] == "undismissable_large_result_reminder"
+    assert "system" in collect_notifications(agent._working_dir)
+
+    # Summarize clears it.
+    result = _summarize(agent, {
+        "action": "summarize",
+        "items": [{"tool_call_id": "toolu_big", "summary": "digest"}],
+    })
+    assert result["status"] == "ok"
+    assert result["cleared_reminders"] == ["large_tool_result:toolu_big"]
+    assert "system" not in collect_notifications(agent._working_dir)

@@ -420,6 +420,164 @@ def test_system_event_dismiss_by_ref_id_clears_file_when_last_event(tmp_path: Pa
     assert not (tmp_path / ".notification" / "system.json").exists()
 
 
+def _publish_large_result_reminder(
+    tmp_path: Path,
+    *,
+    tool_call_id: str = "toolu_big",
+    extra_events: list[dict] | None = None,
+) -> None:
+    """Publish a system.json containing one large_tool_result reminder."""
+    events = [
+        {
+            "event_id": "evt_lr",
+            "source": "large_tool_result",
+            "ref_id": f"large_tool_result:{tool_call_id}",
+            "body": "summarize me",
+        }
+    ]
+    if extra_events:
+        events = list(extra_events) + events
+    publish(
+        tmp_path,
+        "system",
+        {
+            "header": f"{len(events)} system notifications",
+            "icon": "🔔",
+            "priority": "normal",
+            "published_at": "2026-06-20T00:00:00Z",
+            "data": {"events": events},
+        },
+    )
+
+
+def test_large_result_reminder_not_cleared_by_whole_channel_dismiss(tmp_path: Path) -> None:
+    """Whole-channel system dismiss must refuse when a large-result reminder is present."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(tmp_path)
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system"})
+
+    assert res["status"] == "error"
+    assert res["reason"] == "undismissable_large_result_reminder"
+    assert "summarize" in res["message"].lower()
+    # File and the protected event must remain intact.
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    assert any(ev["source"] == "large_tool_result" for ev in events)
+    assert _events(agent, "system_dismiss_refused")[0]["reason"] == \
+        "undismissable_large_result_reminder"
+
+
+def test_large_result_reminder_not_cleared_by_force_whole_channel(tmp_path: Path) -> None:
+    """force=true on a whole-channel system dismiss still cannot clear the reminder."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(tmp_path)
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system", "force": True})
+
+    assert res["status"] == "error"
+    assert res["reason"] == "undismissable_large_result_reminder"
+    assert res["forced"] is True
+    assert (tmp_path / ".notification" / "system.json").exists()
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    assert any(ev["source"] == "large_tool_result" for ev in events)
+
+
+def test_large_result_reminder_not_cleared_by_event_id(tmp_path: Path) -> None:
+    """Targeted event_id dismiss of a large-result reminder is refused."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(tmp_path)
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(
+        agent, {"channel": "system", "event_id": "evt_lr"}
+    )
+
+    assert res["status"] == "error"
+    assert res["reason"] == "undismissable_large_result_reminder"
+    assert res["event_id"] == "evt_lr"
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    assert any(ev["event_id"] == "evt_lr" for ev in events)
+
+
+def test_large_result_reminder_not_cleared_by_ref_id(tmp_path: Path) -> None:
+    """Targeted ref_id dismiss of a large-result reminder is refused."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(tmp_path, tool_call_id="toolu_x")
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(
+        agent,
+        {"channel": "system", "ref_id": "large_tool_result:toolu_x"},
+    )
+
+    assert res["status"] == "error"
+    assert res["reason"] == "undismissable_large_result_reminder"
+    assert res["ref_id"] == "large_tool_result:toolu_x"
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    assert any(ev["ref_id"] == "large_tool_result:toolu_x" for ev in events)
+
+
+def test_large_result_reminder_not_cleared_by_force_ref_id(tmp_path: Path) -> None:
+    """force=true on a targeted ref_id dismiss still cannot clear the reminder."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(tmp_path, tool_call_id="toolu_x")
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(
+        agent,
+        {
+            "channel": "system",
+            "ref_id": "large_tool_result:toolu_x",
+            "force": True,
+        },
+    )
+
+    assert res["status"] == "error"
+    assert res["reason"] == "undismissable_large_result_reminder"
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    assert any(ev["ref_id"] == "large_tool_result:toolu_x" for ev in events)
+
+
+def test_whole_channel_dismiss_with_reminder_preserves_other_events(tmp_path: Path) -> None:
+    """A refused whole-channel dismiss leaves co-resident non-protected events intact too."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(
+        tmp_path,
+        extra_events=[{"event_id": "evt_d", "source": "daemon", "ref_id": "d", "body": "D"}],
+    )
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(agent, {"channel": "system"})
+
+    assert res["status"] == "error"
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    sources = {ev["source"] for ev in events}
+    assert "large_tool_result" in sources
+    assert "daemon" in sources
+
+
+def test_non_protected_system_event_still_dismissible_by_event_id(tmp_path: Path) -> None:
+    """Dismissing a non-large-result event by event_id still works; reminder stays."""
+    agent = _StubAgent(tmp_path)
+    _publish_large_result_reminder(
+        tmp_path,
+        extra_events=[{"event_id": "evt_d", "source": "daemon", "ref_id": "d", "body": "D"}],
+    )
+    _mark_delivered(agent)
+
+    res = sys_intrinsic._dismiss(
+        agent, {"channel": "system", "event_id": "evt_d"}
+    )
+
+    assert res["status"] == "ok"
+    assert res["removed"] == 1
+    events = collect_notifications(tmp_path)["system"]["data"]["events"]
+    sources = {ev["source"] for ev in events}
+    assert sources == {"large_tool_result"}
+
+
 def test_system_event_dismiss_with_malformed_data_is_noop(tmp_path: Path) -> None:
     agent = _StubAgent(tmp_path)
     publish(
