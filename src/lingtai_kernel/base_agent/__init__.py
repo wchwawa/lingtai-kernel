@@ -1930,6 +1930,12 @@ class BaseAgent:
             f"(a) summarize/digest all pending large-result cases in one deliberate batch, or "
             f"(b) tolerate these repeated reminders until you update the persistent config and refresh."
         )
+        _dismiss_policy = (
+            "Dismiss policy: system(action='dismiss') — including force, "
+            "event_id, or ref_id — cannot clear or bypass large-result "
+            "reminders; only a successful system(action='summarize') of the "
+            "matching tool_call_id clears the reminder automatically."
+        )
         if is_spill and spill_path:
             body = (
                 f"[large tool result — spilled] tool_name={tool_name!r} tool_call_id={tool_call_id}\n"
@@ -1939,9 +1945,12 @@ class BaseAgent:
                 f"Read the sidecar file to access the full content, then call:\n"
                 f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
                 f"to replace the context-visible spill manifest with your own summary.\n"
-                f"Treat this notification as a prompt to act, not just FYI: if the result still matters, "
-                f"digest it now and summarize all pending large-result cases in one deliberate batch "
-                f"before continuing deep work; otherwise the reminder will return until the result is summarized.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
                 f"{_threshold_policy}\n"
                 f"The full original remains in the sidecar file and in events.jsonl by tool_call_id."
             )
@@ -1955,9 +1964,12 @@ class BaseAgent:
                 f"After reading the sidecar, call:\n"
                 f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
                 f"to replace the context-visible spill manifest with your own summary.\n"
-                f"Treat this notification as a prompt to act, not just FYI: if the result still matters, "
-                f"digest it now and summarize all pending large-result cases in one deliberate batch "
-                f"before continuing deep work; otherwise the reminder will return until the result is summarized.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
                 f"{_threshold_policy}"
             )
         else:
@@ -1969,9 +1981,12 @@ class BaseAgent:
                 f"After you have digested this result, call:\n"
                 f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
                 f"to replace the context-visible payload with your own summary.\n"
-                f"Treat this notification as a prompt to act, not just FYI: if the result still matters, "
-                f"digest it now and summarize all pending large-result cases in one deliberate batch "
-                f"before continuing deep work; otherwise the reminder will return until the result is summarized.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
                 f"{_threshold_policy}\n"
                 f"The full original remains retrievable from events.jsonl by tool_call_id."
             )

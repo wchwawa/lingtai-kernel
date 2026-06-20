@@ -63,6 +63,33 @@ _PROTECTED_GENERIC_DISMISS: dict[str, str] = {
 # generic clears and point the agent at the producer-specific verb.
 _GENERIC_DISMISS_GUARDED: dict[str, str] = {}
 
+# System-notification event sources that must NOT be cleared via dismiss —
+# neither by whole-channel clear (force or not), nor by targeted event_id/ref_id
+# removal.  These reminders represent unfinished work whose only legitimate
+# clear path is the action that actually resolves the work.  Large-result
+# reminders (``large_tool_result``) are dischargeable only by a *successful*
+# system(action="summarize") of the matching tool_call_id, which clears the
+# reminder automatically; force-dismiss cannot bypass them.
+_UNDISMISSABLE_SYSTEM_EVENT_SOURCES: frozenset[str] = frozenset({"large_tool_result"})
+
+# Agent-facing explanation returned when a dismiss is refused because it would
+# clear (or include) a protected large-result reminder.
+_LARGE_RESULT_DISMISS_REFUSAL = (
+    "large_tool_result reminders cannot be cleared by dismiss (force, "
+    "event_id, or ref_id). They are discharged only by a successful "
+    "system(action='summarize') of the matching tool_call_id, which clears "
+    "the reminder automatically. Summarize the pending large result(s) "
+    "instead of dismissing the reminder."
+)
+
+
+def _is_undismissable_system_event(ev: object) -> bool:
+    """Return True iff *ev* is a system event that dismiss must not remove."""
+    return (
+        isinstance(ev, dict)
+        and ev.get("source") in _UNDISMISSABLE_SYSTEM_EVENT_SOURCES
+    )
+
 
 def validate_channel_name(channel: str) -> None:
     """Validate the syntax of a `.notification/<channel>.json` channel name.
@@ -232,6 +259,99 @@ def clear_with_result(workdir: Path, channel: str) -> bool:
     return True
 
 
+def clear_large_result_reminders(agent, tool_call_ids) -> list[str]:
+    """Remove large-result reminder events for *tool_call_ids* from system.json.
+
+    This is the summarize-driven discharge path: a *successful*
+    system(action="summarize") of a tool_call_id clears its matching
+    ``large_tool_result`` reminder automatically. It is the only sanctioned
+    way to clear these reminders — generic dismiss refuses them
+    (see :func:`dismiss_channel`).
+
+    Matches by the canonical ``ref_id`` (``large_tool_result:{tool_call_id}``)
+    AND ``source == "large_tool_result"`` so an unrelated event that happens to
+    reuse the ref_id string is never silently dropped. Returns the list of
+    ref_ids actually removed. Idempotent: missing file / no match is a no-op.
+
+    Runs under the agent's ``_system_notification_lock`` (when available) so it
+    does not race concurrent enqueues of new system events.
+    """
+    wanted_ref_ids = {
+        f"large_tool_result:{tcid}" for tcid in tool_call_ids if tcid
+    }
+    if not wanted_ref_ids:
+        return []
+
+    target = agent._working_dir / ".notification" / "system.json"
+
+    def _do_clear() -> list[str]:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        data_obj = payload.get("data")
+        events = data_obj.get("events", []) if isinstance(data_obj, dict) else []
+        if not isinstance(events, list):
+            return []
+
+        def _is_target(ev: object) -> bool:
+            return (
+                isinstance(ev, dict)
+                and ev.get("source") == "large_tool_result"
+                and ev.get("ref_id") in wanted_ref_ids
+            )
+
+        removed = [ev.get("ref_id") for ev in events if _is_target(ev)]
+        if not removed:
+            return []
+        kept = [ev for ev in events if not _is_target(ev)]
+        try:
+            if kept:
+                from datetime import datetime, timezone
+                payload["header"] = (
+                    f"{len(kept)} system notification"
+                    f"{'s' if len(kept) != 1 else ''}"
+                )
+                payload["published_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    data = {}
+                data["events"] = kept
+                payload["data"] = data
+                publish(agent._working_dir, "system", payload)
+            else:
+                clear_with_result(agent._working_dir, "system")
+        except OSError:
+            return []
+        return [r for r in removed if r]
+
+    lock = getattr(agent, "_system_notification_lock", None)
+    if lock is not None:
+        with lock:
+            removed = _do_clear()
+    else:
+        removed = _do_clear()
+
+    if removed:
+        # Pending ACTIVE-state payloads may reference the now-removed events.
+        if hasattr(agent, "_pending_notification_meta"):
+            agent._pending_notification_meta = None
+        if hasattr(agent, "_pending_notification_fp"):
+            agent._pending_notification_fp = None
+        try:
+            agent._log(
+                "large_result_reminder_cleared_by_summarize",
+                removed_ref_ids=removed,
+            )
+        except Exception:
+            pass
+    return removed
+
+
 def _channel_fingerprint_entry(fp: tuple | None, channel: str) -> tuple | None:
     """Return one channel's fingerprint entry from a directory fingerprint."""
     filename = f"{channel}.json"
@@ -293,6 +413,65 @@ def _stale_channel_refusal(
             "or pass force=true to knowingly clear it."
         ),
     }
+
+
+def _undismissable_system_event_refusal(
+    agent,
+    channel: str,
+    *,
+    invoked_by: str,
+    force: bool,
+    protected: list,
+    event_id: str | None,
+    ref_id: str | None,
+) -> dict:
+    """Refuse a dismiss that would clear protected (large-result) reminders.
+
+    Returned for whole-channel system clears that contain at least one
+    large-result reminder, and for targeted event_id/ref_id dismisses that
+    match one. The only legitimate clear path is a successful summarize.
+    """
+    protected_ref_ids = [
+        ev.get("ref_id")
+        for ev in protected
+        if isinstance(ev, dict) and ev.get("ref_id")
+    ]
+    try:
+        agent._log(
+            "notification_dismiss_refused",
+            reason="undismissable_large_result_reminder",
+            channel=channel,
+            invoked_by=invoked_by,
+            forced=bool(force),
+            event_id=event_id,
+            ref_id=ref_id,
+            protected_ref_ids=protected_ref_ids,
+        )
+        if invoked_by == "system":
+            agent._log(
+                "system_dismiss_refused",
+                reason="undismissable_large_result_reminder",
+                channel=channel,
+                forced=bool(force),
+                event_id=event_id,
+                ref_id=ref_id,
+                protected_ref_ids=protected_ref_ids,
+            )
+    except Exception:
+        pass
+    result = {
+        "status": "error",
+        "reason": "undismissable_large_result_reminder",
+        "channel": channel,
+        "forced": bool(force),
+        "protected_ref_ids": protected_ref_ids,
+        "message": _LARGE_RESULT_DISMISS_REFUSAL,
+    }
+    if event_id:
+        result["event_id"] = event_id
+    if ref_id:
+        result["ref_id"] = ref_id
+    return result
 
 
 def dismiss_channel(
@@ -437,18 +616,38 @@ def dismiss_channel(
 
         goal_reminder_cleared_by_whole_system_dismiss = False
         if channel == "system":
+            protected_system_events: list = []
             try:
                 payload = json.loads((agent._working_dir / ".notification" / "system.json").read_text(encoding="utf-8"))
                 data_obj = payload.get("data") if isinstance(payload, dict) else {}
                 events = data_obj.get("events", []) if isinstance(data_obj, dict) else []
+                events = events if isinstance(events, list) else []
+                protected_system_events = [
+                    ev for ev in events if _is_undismissable_system_event(ev)
+                ]
                 goal_reminder_cleared_by_whole_system_dismiss = any(
                     isinstance(ev, dict)
                     and ev.get("source") == "goal.reminder"
                     and str(ev.get("ref_id", "")).startswith("goal:")
-                    for ev in (events if isinstance(events, list) else [])
+                    for ev in events
                 )
             except Exception:
+                protected_system_events = []
                 goal_reminder_cleared_by_whole_system_dismiss = False
+
+            # A whole-channel system clear (force or not) must not wipe out
+            # large-result reminders: they are dischargeable only by a
+            # successful summarize. Refuse and point the agent at summarize.
+            if protected_system_events:
+                return _undismissable_system_event_refusal(
+                    agent,
+                    channel,
+                    invoked_by=invoked_by,
+                    force=force,
+                    protected=protected_system_events,
+                    event_id=None,
+                    ref_id=None,
+                )
 
         try:
             existed = clear_with_result(agent._working_dir, channel)
@@ -567,6 +766,22 @@ def dismiss_channel(
         removed_events = [ev for ev in events if _match(ev)]
         kept = [ev for ev in events if not _match(ev)]
         removed = len(removed_events)
+
+        # Targeted event_id/ref_id dismiss must not remove a large-result
+        # reminder either: it is dischargeable only by a successful summarize.
+        protected_matched = [
+            ev for ev in removed_events if _is_undismissable_system_event(ev)
+        ]
+        if protected_matched:
+            return _undismissable_system_event_refusal(
+                agent,
+                channel,
+                invoked_by=invoked_by,
+                force=force,
+                protected=protected_matched,
+                event_id=event_id,
+                ref_id=ref_id,
+            )
 
         if removed == 0:
             try:
