@@ -1210,7 +1210,8 @@ class Agent(BaseAgent):
         self._session._config = self._config
 
         # Reload large-result notification threshold from init.json.
-        # Default 3000; 0 disables notifications entirely.
+        # Default 3000; 0 disables notifications entirely.  An explicit
+        # manifest value overrides the default (config override preserved).
         raw_threshold = m.get("summarize_notification_threshold")
         if isinstance(raw_threshold, int) and not isinstance(raw_threshold, bool) and raw_threshold >= 0:
             self._summarize_notification_threshold = raw_threshold

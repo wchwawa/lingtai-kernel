@@ -71,9 +71,11 @@ MANIFEST_OPTIONAL: dict[str, type | tuple[type, ...]] = {
     "pseudo_agent_subscriptions": list,
     "preset": dict,
     # Large-result notification threshold.  When a tool result's serialized
-    # length exceeds this value, a system-channel notification fires.
-    # Default: 3000.  0 disables notifications.  Runtime mutation via the
-    # system tool is not supported — change this field and refresh.
+    # length exceeds this value it becomes a pending large-result case; the
+    # system-channel notification fires only once the combined length of all
+    # pending large-result cases exceeds 20000 chars (the total-length gate).
+    # Default: 3000.  0 disables notifications.  Runtime mutation via the system
+    # tool is not supported — change this field and refresh.
     "summarize_notification_threshold": int,
 }
 

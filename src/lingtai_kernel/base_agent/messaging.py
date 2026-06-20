@@ -5,6 +5,107 @@ import time
 
 from ..message import _make_message, MSG_REQUEST
 
+# Default large-result notification size threshold (chars).  A tool result whose
+# effective length exceeds this is a "pending large-result case".  Configurable
+# via ``manifest.summarize_notification_threshold`` in init.json + refresh.
+DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD = 3000
+
+# Total-length gate: large-result system notifications are suppressed until the
+# *combined* effective length of all pending large-result cases (each above the
+# size threshold) is *strictly greater than* this many chars.  A single pending
+# result over the gate triggers by itself; several smaller long results trigger
+# once their sum exceeds the gate, regardless of how many there are.  This
+# replaces the earlier count-based (>5 pending) gate.
+LARGE_RESULT_TOTAL_LEN_GATE = 20000
+
+
+def _pending_large_result_len(block, threshold: int):
+    """Return the effective length of ``block`` if it is a pending large result.
+
+    A "pending large-result case" is a non-synthesized, non-``daemon_tool_result``,
+    unsummarized ``ToolResultBlock`` whose effective length exceeds ``threshold``.
+    For spill manifests the effective length is ``original_char_count`` (the
+    wire-visible manifest is small, but the original payload may have been large).
+
+    Returns the effective char length when the block qualifies, else ``None``.
+    This is the single source of truth shared by the total-length summer
+    (``_pending_large_result_total_len``) and the rescan emitter
+    (``_rescan_large_tool_results``) so both agree on what "pending" means.
+    """
+    from ..llm.interface import ToolResultBlock
+    from ..intrinsics.system.summarize import _is_already_summarized
+    from ..tool_result_artifacts import is_spill_manifest
+
+    if not isinstance(block, ToolResultBlock):
+        return None
+    if getattr(block, "synthesized", False):
+        return None
+    if block.name == "daemon_tool_result":
+        return None
+    if _is_already_summarized(block.content):
+        return None
+
+    content = block.content
+    if is_spill_manifest(content):
+        original_char_count = (
+            content.get("original_char_count") if isinstance(content, dict) else None
+        )
+        if not isinstance(original_char_count, int) or original_char_count <= threshold:
+            return None
+        return original_char_count
+
+    if isinstance(content, str):
+        result_len = len(content)
+    else:
+        import json as _json
+
+        try:
+            serialized = _json.dumps(content, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            serialized = str(content)
+        result_len = len(serialized)
+
+    if result_len <= threshold:
+        return None
+    return result_len
+
+
+def _pending_large_result_total_len(agent) -> int:
+    """Sum the effective lengths of all pending large-result cases in live history.
+
+    A pending case is an unsummarized, non-excluded ``ToolResultBlock`` whose
+    effective length exceeds ``_summarize_notification_threshold`` (see
+    ``_pending_large_result_len``).  This returns the total of those effective
+    lengths (the visible/original chars), or 0 when the threshold is disabled
+    (<= 0) or there is no chat session yet.
+
+    Used to gate large-result system notifications: they are only published once
+    this total is strictly greater than ``LARGE_RESULT_TOTAL_LEN_GATE`` (>20000).
+    """
+    threshold = getattr(
+        agent, "_summarize_notification_threshold", DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+    )
+    if threshold <= 0:
+        return 0
+
+    chat = getattr(agent, "_chat", None)
+    if chat is None:
+        return 0
+    iface = getattr(chat, "interface", None)
+    if iface is None:
+        return 0
+    entries = getattr(iface, "_entries", [])
+
+    total = 0
+    for entry in entries:
+        if entry.role != "user":
+            continue
+        for block in entry.content:
+            eff_len = _pending_large_result_len(block, threshold)
+            if eff_len is not None:
+                total += eff_len
+    return total
+
 
 def _on_mail_received(agent, payload: dict) -> None:
     """Callback for MailService — route incoming mail to inbox.
@@ -223,8 +324,18 @@ def _rescan_large_tool_results(agent) -> int:
     trigger a ``large_tool_result`` system notification even though no new
     tool execution has happened.
 
+    Total-length gate:
+      - The whole batch of notifications is suppressed until the *combined*
+        effective length of all pending large-result cases above the size
+        threshold is *strictly greater than* ``LARGE_RESULT_TOTAL_LEN_GATE``
+        (>20000 chars).  Below that total nothing fires; once the total exceeds
+        the gate, all pending cases are (re-)notified in one sweep.  A single
+        pending result over the gate triggers by itself.  This avoids repeated
+        wasteful interruptions for a small amount of pending large-result text.
+
     Skips:
       - threshold <= 0 (disabled)
+      - pending large-result total <= LARGE_RESULT_TOTAL_LEN_GATE (gate not met)
       - ``daemon_tool_result`` tool names (child-daemon relays)
       - blocks already summarized (``artifact == SUMMARIZE_MARKER``)
       - synthesized blocks (``block.synthesized == True``)
@@ -236,14 +347,16 @@ def _rescan_large_tool_results(agent) -> int:
       - If the notification was previously dismissed (no longer in system.json),
         the rescan will re-emit it on the next turn — by design (requirement §3).
 
-    Returns the count of notifications published (0 when nothing fired or
-    threshold is disabled).
+    Returns the count of notifications published (0 when nothing fired, the
+    threshold is disabled, or the total-length gate is not met).
     """
     from ..llm.interface import ToolResultBlock
     from ..intrinsics.system.summarize import _is_already_summarized
     from ..tool_result_artifacts import is_spill_manifest
 
-    threshold = getattr(agent, "_summarize_notification_threshold", 3000)
+    threshold = getattr(
+        agent, "_summarize_notification_threshold", DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+    )
     if threshold <= 0:
         return 0
 
@@ -254,6 +367,13 @@ def _rescan_large_tool_results(agent) -> int:
     if iface is None:
         return 0
     entries = getattr(iface, "_entries", [])
+
+    # Total-length gate: suppress until the combined effective length of all
+    # pending large-result cases is strictly greater than
+    # LARGE_RESULT_TOTAL_LEN_GATE (>20000 chars).  Below that total, stay quiet.
+    pending_total = _pending_large_result_total_len(agent)
+    if pending_total <= LARGE_RESULT_TOTAL_LEN_GATE:
+        return 0
 
     published = 0
     for entry in entries:
@@ -310,7 +430,11 @@ def _rescan_large_tool_results(agent) -> int:
 
             # Build notification body — same templates as _maybe_notify_large_tool_result.
             _threshold_policy = (
-                f"The threshold ({threshold} chars) is set via manifest.summarize_notification_threshold "
+                f"This reminder is batched: it only appears once the combined length of "
+                f"pending large-result cases (each above the {threshold}-char threshold) "
+                f"exceeds {LARGE_RESULT_TOTAL_LEN_GATE} chars ({pending_total} chars pending now). "
+                f"The threshold ({threshold} chars, default {DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD}) "
+                f"is set via manifest.summarize_notification_threshold "
                 f"in init.json and takes effect after system(action='refresh'). "
                 f"It cannot be changed temporarily at runtime. "
                 f"If you intentionally keep large results visible, you must either: "

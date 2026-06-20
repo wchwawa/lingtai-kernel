@@ -472,9 +472,12 @@ class BaseAgent:
         self._notification_live_holder: dict | None = None
 
         # Large-result notification threshold (chars).  When a main-agent
-        # tool result's serialized length exceeds this value, a system-channel
-        # notification is published reminding the agent to use
-        # system(action="summarize") after digesting the result.
+        # tool result's serialized length exceeds this value, it becomes a
+        # pending large-result case.  A system-channel notification reminding
+        # the agent to use system(action="summarize") is only published once
+        # the combined length of all pending large-result cases exceeds 20000
+        # chars (the total-length gate; see
+        # base_agent/messaging.py:LARGE_RESULT_TOTAL_LEN_GATE).
         # Default: 3000 chars.  Configurable only via manifest.summarize_notification_threshold
         # in init.json + refresh — runtime mutation is not supported.
         self._summarize_notification_threshold: int = 3000
@@ -1774,8 +1777,15 @@ class BaseAgent:
         """
         import json as _json
         from ..tool_result_artifacts import is_spill_manifest
+        from .messaging import (
+            DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD,
+            LARGE_RESULT_TOTAL_LEN_GATE,
+            _pending_large_result_total_len,
+        )
 
-        threshold = getattr(self, "_summarize_notification_threshold", 3000)
+        threshold = getattr(
+            self, "_summarize_notification_threshold", DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+        )
         if threshold <= 0:
             return
 
@@ -1815,6 +1825,26 @@ class BaseAgent:
                 return
             spill_path = None
 
+        # Total-length gate: suppress the notification until the combined
+        # effective length of all pending large-result cases above the threshold
+        # is strictly greater than LARGE_RESULT_TOTAL_LEN_GATE (>20000 chars).
+        # Below that total this stays quiet to avoid repeated wasteful
+        # interruptions; the per-turn rescan (_rescan_large_tool_results) is the
+        # authoritative emitter and will fire the whole batch once the gate is
+        # met.  We sum pending cases already in live history; this just-arrived
+        # result may not be committed yet, so the gate never fires early.
+        pending_total = _pending_large_result_total_len(self)
+        if pending_total <= LARGE_RESULT_TOTAL_LEN_GATE:
+            self._log(
+                "large_tool_result_notification_gated",
+                tool_name=tool_name,
+                result_len=result_len,
+                threshold=threshold,
+                pending_total=pending_total,
+                gate=LARGE_RESULT_TOTAL_LEN_GATE,
+            )
+            return
+
         # Resolve the tool_call_id.  ToolExecutor passes it directly; fall back
         # to a heuristic scan of the pending assistant turn only if not provided.
         if tool_call_id is None:
@@ -1848,7 +1878,11 @@ class BaseAgent:
                 pass
 
         _threshold_policy = (
-            f"The threshold ({threshold} chars) is set via manifest.summarize_notification_threshold "
+            f"This reminder is batched: it only appears once the combined length of "
+            f"pending large-result cases (each above the {threshold}-char threshold) "
+            f"exceeds {LARGE_RESULT_TOTAL_LEN_GATE} chars. "
+            f"The threshold ({threshold} chars, default {DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD}) "
+            f"is set via manifest.summarize_notification_threshold "
             f"in init.json and takes effect after system(action='refresh'). "
             f"It cannot be changed temporarily at runtime. "
             f"If you intentionally keep large results visible, you must either: "
