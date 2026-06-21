@@ -3,7 +3,7 @@
 Covers the unified hard cap applied by ``ToolExecutor`` immediately before a
 result reaches the LLM wire: small results pass through unchanged; oversized
 results spill to ``<workdir>/tmp/tool-results/<name>`` and the wire sees a
-compact manifest pointing at the artifact.  Default hard cap is 100 000 chars. ToolExecutor(max_result_chars=N) may choose a smaller cap for tests/embedded use, but cannot raise above the hard ceiling.
+compact manifest pointing at the artifact.  Default hard cap is 200 000 chars. ToolExecutor(max_result_chars=N) may choose a smaller cap for tests/embedded use, but cannot raise above the hard ceiling.
 """
 from __future__ import annotations
 
@@ -27,13 +27,13 @@ from lingtai_kernel.tool_result_artifacts import PREVENTIVE_MAX_CHARS
 CAP = _DEFAULT_MAX_RESULT_CHARS
 
 
-def test_preventive_cap_default_is_100k():
-    """Default preventive cap must be the 100 000 char hard ceiling."""
-    assert PREVENTIVE_MAX_CHARS == 100_000, (
-        f"PREVENTIVE_MAX_CHARS should be 100 000, got {PREVENTIVE_MAX_CHARS}"
+def test_preventive_cap_default_is_200k():
+    """Default preventive cap must be the 200 000 char hard ceiling."""
+    assert PREVENTIVE_MAX_CHARS == 200_000, (
+        f"PREVENTIVE_MAX_CHARS should be 200 000, got {PREVENTIVE_MAX_CHARS}"
     )
-    assert _DEFAULT_MAX_RESULT_CHARS == 100_000, (
-        f"_DEFAULT_MAX_RESULT_CHARS should be 100 000, got {_DEFAULT_MAX_RESULT_CHARS}"
+    assert _DEFAULT_MAX_RESULT_CHARS == 200_000, (
+        f"_DEFAULT_MAX_RESULT_CHARS should be 200 000, got {_DEFAULT_MAX_RESULT_CHARS}"
     )
 
 
@@ -61,7 +61,7 @@ def test_configurable_cap_via_executor(tmp_path):
 
 
 def test_executor_cap_cannot_exceed_hard_ceiling(tmp_path):
-    """ToolExecutor(max_result_chars=N) cannot raise above the 100k hard cap."""
+    """ToolExecutor(max_result_chars=N) cannot raise above the 200k hard cap."""
     def dispatch(tc):
         return "A" * (PREVENTIVE_MAX_CHARS + 1)
 
@@ -370,7 +370,7 @@ def test_artifact_directory_created_lazily(tmp_path):
 
 def test_spill_preserves_unicode(tmp_path):
     """Non-ASCII content must survive the round trip to disk."""
-    big = ("器灵 — 灵台方寸山 — " + "字" * 50) * 4000  # well over 100K CAP
+    big = ("器灵 — 灵台方寸山 — " + "字" * 50) * 4000  # well over 200K CAP
     assert _serialized_len(big) > CAP
 
     out = _spill_oversized_result(
@@ -388,7 +388,7 @@ def test_spill_preserves_unicode(tmp_path):
 def test_spill_artifact_preserves_full_payload_beyond_legacy_50k_cap(tmp_path):
     """Regression: the legacy 50KB lossy `_truncate_result` must NOT run on
     the primary path before the spill boundary.  A payload that exceeds both
-    the 100K spill cap AND the legacy 50KB byte cap must land in the sidecar
+    the 200K spill cap AND the legacy 50KB byte cap must land in the sidecar
     artifact with its full content intact — no ``[truncated — N bytes total]``
     marker, no half-dict surgery, no dropped list items.
 
@@ -402,7 +402,7 @@ def test_spill_artifact_preserves_full_payload_beyond_legacy_50k_cap(tmp_path):
     # Use a length above the legacy 50K byte cap so the bug would trigger
     # the destructive path if `_truncate_result` were still in the way.
     LEGACY_LEGACY_BYTE_CAP = 50_000
-    payload_chunk = "Z" * (LEGACY_LEGACY_BYTE_CAP * 2)  # 100K of Zs
+    payload_chunk = "Z" * (CAP + LEGACY_LEGACY_BYTE_CAP)  # >200K of Zs
     assert len(payload_chunk) > LEGACY_LEGACY_BYTE_CAP
 
     huge_payload = {"status": "ok", "blob": payload_chunk, "marker": "TAIL"}

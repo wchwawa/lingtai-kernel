@@ -1,6 +1,6 @@
 ---
 name: read-manual
-description: "Complete guide for the read tool: continuation workflow, next_offset pagination, line_truncated handling, runtime tool-result spill vs read-level pagination, 20k read default / 100k runtime hard cap, and when to use bash/grep/sed for truncated lines. Use when implementing complete file-read workflows, handling large files, or understanding cap and truncation semantics."
+description: "Complete guide for the read tool: continuation workflow, next_offset pagination, line_truncated handling, runtime tool-result spill vs read-level pagination, 50k read default / 200k runtime hard cap, and when to use bash/grep/sed for truncated lines. Use when implementing complete file-read workflows, handling large files, or understanding cap and truncation semantics."
 version: 0.1.0
 tags: [read, files, continuation, truncation, cap, pagination]
 ---
@@ -10,21 +10,21 @@ tags: [read, files, continuation, truncation, cap, pagination]
 This skill documents the complete workflow for reading files with the `read` tool.
 For basic tool choice (read vs write vs edit vs grep vs glob), see the `file-manual` skill.
 
-## Cap model: 20k read default, 100k runtime hard ceiling
+## Cap model: 50k read default, 200k runtime hard ceiling
 
 Before using `read`, load this manual when you are dealing with large files,
 complete-content workflows, truncation, or `line_truncated` results.
 
 There are two limits:
 
-- `read` default page budget: **20 000 characters per call**.
-- Runtime tool-result hard ceiling: **100 000 characters**. This ceiling is not
+- `read` default page budget: **50 000 characters per call**.
+- Runtime tool-result hard ceiling: **200 000 characters**. This ceiling is not
   configurable by agents or prompts; it prevents provider-visible tool results
   from exploding.
 
 `read` accepts an optional per-call `max_chars` parameter. Use it to request a
 smaller or larger chunk for that call. Values above the runtime hard ceiling are
-clamped to 100 000; the actual effective value appears as `cap_chars` when the
+clamped to 200 000; the actual effective value appears as `cap_chars` when the
 result is truncated. Do not assume the old 10 000-character or 8 000-character
 limits from earlier versions.
 
@@ -72,7 +72,7 @@ PY
 Use the result to decide:
 
 - `limit` = how many lines to request.
-- `max_chars` = per-call character budget (default 20k, max 100k).
+- `max_chars` = per-call character budget (default 50k, max 200k).
 - `offset` = where to begin or resume.
 
 ## Complete-content workflow
@@ -128,11 +128,11 @@ If you need a smaller window (to avoid transport spill or to target a region):
 Two separate caps apply:
 
 1. **Read-level pagination cap**: the effective per-call budget chosen by
-   `max_chars` or the 20k default. When content exceeds this cap, the result is
+   `max_chars` or the 50k default. When content exceeds this cap, the result is
    returned with `truncated=true` and continuation metadata. The agent reads the
    next chunk by calling `read` again with `next_offset`.
 
-2. **Runtime preventive hard ceiling**: the non-configurable 100k cap applied by
+2. **Runtime preventive hard ceiling**: the non-configurable 200k cap applied by
    `ToolExecutor` to every tool result just before it reaches the LLM wire. If
    any result still exceeds this ceiling, the full content is written to
    `<workdir>/tmp/tool-results/<…>` and a compact manifest replaces the wire
@@ -140,7 +140,7 @@ Two separate caps apply:
    `preview`, and `original_char_count`.
 
 A well-formed `read` result should normally stay under the outer hard ceiling
-because `max_chars` is clamped to 100k. If you still see a spill manifest from
+because `max_chars` is clamped to 200k. If you still see a spill manifest from
 `read`, inspect the `spill_path` artifact for the full payload; then re-call
 `read` with a smaller `limit`/`max_chars` or process the artifact via
 `bash`/`grep`/Python.
