@@ -19,7 +19,7 @@ PROVIDERS = {"providers": [], "default": "builtin"}
 # Read defaults to a smaller everyday page budget while the runtime tool-result
 # boundary remains a larger non-configurable hard ceiling. Callers may pass
 # ``max_chars`` per read call; values above the runtime ceiling are clamped.
-DEFAULT_READ_CAP_CHARS: int = 20_000
+DEFAULT_READ_CAP_CHARS: int = 50_000
 READ_HARD_CAP_CHARS: int = PREVENTIVE_MAX_CHARS
 
 
@@ -41,7 +41,7 @@ def _resolve_call_cap(agent: "BaseAgent", requested_max_chars: object) -> int:
     ``max_chars`` lets the caller intentionally ask for smaller or larger chunks
     than the read default while the runtime hard cap remains the ceiling that
     prevents provider-visible tool-result blowups. Invalid per-call values are
-    ignored and use the 20k read default.
+    ignored and use the 50k read default.
     """
     runtime_cap = _runtime_hard_cap(agent)
     requested_cap = _valid_cap(requested_max_chars)

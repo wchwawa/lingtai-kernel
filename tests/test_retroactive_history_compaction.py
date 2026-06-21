@@ -37,7 +37,7 @@ from lingtai_kernel.tool_result_artifacts import (
 # -- Shared helper: manifest shape & detection ------------------------------
 
 def test_constants_match_spec():
-    assert PREVENTIVE_MAX_CHARS == 100_000
+    assert PREVENTIVE_MAX_CHARS == 200_000
     assert RETROACTIVE_MAX_CHARS == 5_000
 
 

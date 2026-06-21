@@ -4,7 +4,7 @@ Two related concerns live here:
 
 1. **Preventive spill** (``spill_oversized_result``) — called by ``ToolExecutor``
    on every newly-built tool result.  If serialized content exceeds
-   ``PREVENTIVE_MAX_CHARS`` (100_000 hard ceiling), the full original is written to
+   ``PREVENTIVE_MAX_CHARS`` (200_000 hard ceiling), the full original is written to
    ``<workdir>/tmp/tool-results/<…>.{json,txt}`` and a compact manifest dict
    (``status="spilled"``, ``artifact="lingtai_tool_result_spill"``) replaces
    the wire-bound content.
@@ -60,7 +60,7 @@ _HOISTED_RESERVED_FIELDS = ("_advisory",)
 # Preventive cap — applied by ToolExecutor on every freshly built tool
 # result, before it reaches the LLM wire. This is the non-configurable hard
 # ceiling for provider-visible tool results.
-PREVENTIVE_MAX_CHARS = 100_000
+PREVENTIVE_MAX_CHARS = 200_000
 
 # Retroactive cap — applied by the AED recovery path to results already
 # committed to the chat interface.  Tighter than the preventive cap so the
