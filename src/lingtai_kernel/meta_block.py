@@ -59,6 +59,56 @@ GUIDANCE_KEY = "guidance"
 NOTIFICATIONS_KEY = "notifications"
 NOTIFICATION_GUIDANCE_KEY = "notification_guidance"
 
+# Keys that are kernel/runtime scaffolding, not the formal tool-result payload.
+# Summarize and large-result reminder sizing must ignore these so notification
+# or guidance text is not treated as result content to be summarized.
+FORMAL_TOOL_RESULT_EXCLUDED_KEYS = frozenset({
+    META_ENVELOPE_KEY,
+    "_runtime_pending",
+    "_advisory",
+    "active_turn_tool_calls",
+    "active_turn_tool_call_notice",
+})
+
+
+def formal_tool_result_content(content):
+    """Return the formal tool-result payload, excluding kernel metadata.
+
+    The ``_meta`` envelope can contain notifications and guidance that are
+    channel/runtime state, not the payload returned by the tool.  Context
+    summarization and large-result reminder sizing operate on this formal body
+    only, so notification contents are neither threshold-counted nor
+    summarized as if they were the result.
+    """
+    if not isinstance(content, dict):
+        return content
+    return {
+        key: value
+        for key, value in content.items()
+        if key not in FORMAL_TOOL_RESULT_EXCLUDED_KEYS
+    }
+
+
+def _visible_content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return _json.dumps(content, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def formal_tool_result_visible_len(content) -> int:
+    """Visible character length of the formal tool-result payload only."""
+    return len(_visible_content_text(formal_tool_result_content(content)))
+
+
+def formal_tool_result_preview(content, limit: int = 200) -> str:
+    """Preview string for the formal tool-result payload only."""
+    if limit <= 0:
+        return ""
+    return _visible_content_text(formal_tool_result_content(content))[:limit]
+
 
 def _meta_block(result: dict) -> dict:
     """Return ``result["_meta"]``, creating an empty dict if absent.
@@ -97,7 +147,9 @@ def build_meta_readme() -> dict:
         ),
         NOTIFICATIONS_KEY: (
             "Channel notification payloads with kernel safety framing under "
-            "notification_guidance. Latest tool result only; channel-owned."
+            "notification_guidance. Latest tool result only; channel-owned. "
+            "Not part of the formal tool-result payload; do not summarize "
+            "notification contents as the result body."
         ),
     }
 

@@ -33,7 +33,12 @@ from ..llm import (
     ToolCall,
 )
 from ..logging import get_logger
-from ..meta_block import build_meta, build_notification_payload
+from ..meta_block import (
+    build_meta,
+    build_notification_payload,
+    formal_tool_result_preview,
+    formal_tool_result_visible_len,
+)
 from ..session import SessionManager
 from ..tc_inbox import TCInbox
 from ..token_ledger import append_token_entry
@@ -1834,7 +1839,6 @@ class BaseAgent:
         ToolExecutor.  A heuristic scan of the pending assistant turn is used
         only as a fallback when the id is not provided.
         """
-        import json as _json
         from ..tool_result_artifacts import is_spill_manifest
         from .messaging import (
             DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD,
@@ -1868,17 +1872,11 @@ class BaseAgent:
             spill_path = result.get("spill_path") if isinstance(result, dict) else None  # type: ignore[union-attr]
             preview_text = None  # do not show raw spill payload as preview
         else:
-            # Compute serialized length of the non-spill result.
-            if isinstance(result, str):
-                result_len = len(result)
-                preview_text = result[:200]
-            else:
-                try:
-                    serialized = _json.dumps(result, ensure_ascii=False, default=str)
-                except (TypeError, ValueError):
-                    serialized = str(result)
-                result_len = len(serialized)
-                preview_text = serialized[:200]
+            # Compute length/preview of the formal payload only. Runtime metadata
+            # (notably _meta.notifications / _meta.guidance) is not tool-result
+            # content and must not drive summarize reminders.
+            result_len = formal_tool_result_visible_len(result)
+            preview_text = formal_tool_result_preview(result, 200)
 
             if result_len <= threshold:
                 return
@@ -1955,7 +1953,9 @@ class BaseAgent:
             "Summarization via system(action='summarize') remains preferred: it "
             "replaces the context-visible payload with your own summary and "
             "auto-clears the reminder. Dismissal only clears the notification; "
-            "the original result stays in chat history and events.jsonl."
+            "the original result stays in chat history and events.jsonl. "
+            "Notification/guidance metadata under _meta is not formal result content "
+            "and should not be summarized as the tool result body."
         )
         if is_spill and spill_path:
             body = (
@@ -1970,7 +1970,8 @@ class BaseAgent:
                 f"if a human/chat notification is pending, handle the human first. If this result still "
                 f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
                 f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
-                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
                 f"{_dismiss_policy}\n"
                 f"{_threshold_policy}\n"
                 f"The full original remains in the sidecar file and in events.jsonl by tool_call_id."
@@ -1989,7 +1990,8 @@ class BaseAgent:
                 f"if a human/chat notification is pending, handle the human first. If this result still "
                 f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
                 f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
-                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
                 f"{_dismiss_policy}\n"
                 f"{_threshold_policy}"
             )
@@ -2006,7 +2008,8 @@ class BaseAgent:
                 f"if a human/chat notification is pending, handle the human first. If this result still "
                 f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
                 f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
-                f"cleanup metadata; summarize the original substantive result once, then continue.\n"
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
                 f"{_dismiss_policy}\n"
                 f"{_threshold_policy}\n"
                 f"The full original remains retrievable from events.jsonl by tool_call_id."
