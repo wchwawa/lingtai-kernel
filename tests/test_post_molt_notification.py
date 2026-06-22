@@ -23,6 +23,9 @@ import json
 from unittest.mock import MagicMock
 
 
+from tests._molt_helpers import write_session_journal as _write_session_journal
+
+
 # ---------------------------------------------------------------------------
 # Helpers — mirror tests/test_molt_notification_persistence.py for parity
 # ---------------------------------------------------------------------------
@@ -109,11 +112,13 @@ class TestPostMoltNotificationAgentMolt:
                 reasoning="context full; want to resume foo cleanly",
             )
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
             result = _context_molt(agent, {
                 "summary": "finish the foo feature",
                 "_reasoning": "context full; want to resume foo cleanly",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
             assert result.get("status") == "ok"
 
@@ -155,10 +160,12 @@ class TestPostMoltNotificationAgentMolt:
                 summary="first line: keep going on the parser bug\nsecond line",
             )
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
             result = _context_molt(agent, {
                 "summary": "first line: keep going on the parser bug\nsecond line",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
             assert result.get("status") == "ok"
 
@@ -187,11 +194,13 @@ class TestPostMoltNotificationAgentMolt:
                 summary="continue work",
             )
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
             result = _context_molt(agent, {
                 "summary": "continue work",
                 "reasoning": "plain-key reasoning",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
             assert result.get("status") == "ok"
 
@@ -276,8 +285,12 @@ class TestPostMoltContinuationSignal:
             )
             _build_molt_call_entry(mock_interface, tc_id, summary=summary)
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
-            result = _context_molt(agent, {"summary": summary, "_tc_id": tc_id})
+            result = _context_molt(agent, {
+                "summary": summary, "_tc_id": tc_id,
+                "session_journal_path": journal_path,
+            })
             assert result.get("status") == "ok"
 
             payload = _read_post_molt(agent)
@@ -305,8 +318,12 @@ class TestPostMoltContinuationSignal:
             tc_id = "toolu_cont_2"
             _build_molt_call_entry(mock_interface, tc_id, summary="keep going")
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
-            result = _context_molt(agent, {"summary": "keep going", "_tc_id": tc_id})
+            result = _context_molt(agent, {
+                "summary": "keep going", "_tc_id": tc_id,
+                "session_journal_path": journal_path,
+            })
             assert result.get("status") == "ok"
 
             instr = (_read_post_molt(agent).get("instructions") or "").lower()
@@ -340,8 +357,12 @@ class TestPostMoltContinuationSignal:
             summary = "Next step: finish wiring the parser; tests red on case 3."
             _build_molt_call_entry(mock_interface, tc_id, summary=summary)
 
+            journal_path = _write_session_journal(agent)
             from lingtai_kernel.intrinsics.psyche._molt import _context_molt
-            result = _context_molt(agent, {"summary": summary, "_tc_id": tc_id})
+            result = _context_molt(agent, {
+                "summary": summary, "_tc_id": tc_id,
+                "session_journal_path": journal_path,
+            })
             assert result.get("status") == "ok"
 
             data = _read_post_molt(agent)["data"]

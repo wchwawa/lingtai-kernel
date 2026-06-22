@@ -91,6 +91,26 @@ def test_wrong_type_manifest_field():
         validate_init(data)
 
 
+def test_summarize_notification_threshold_rejects_negative():
+    data = _valid_init()
+    data["manifest"]["summarize_notification_threshold"] = -1
+    with pytest.raises(ValueError, match="summarize_notification_threshold"):
+        validate_init(data)
+
+
+def test_summarize_notification_threshold_rejects_bool():
+    data = _valid_init()
+    data["manifest"]["summarize_notification_threshold"] = True
+    with pytest.raises(ValueError, match="summarize_notification_threshold"):
+        validate_init(data)
+
+
+def test_summarize_notification_threshold_allows_zero():
+    data = _valid_init()
+    data["manifest"]["summarize_notification_threshold"] = 0
+    validate_init(data)  # 0 intentionally disables large-result notifications.
+
+
 def test_wrong_type_capabilities():
     data = _valid_init()
     data["manifest"]["capabilities"] = ["file", "bash"]
@@ -141,6 +161,32 @@ def test_api_key_env_wrong_type():
     data = _valid_init()
     data["manifest"]["llm"]["api_key_env"] = 123
     with pytest.raises(ValueError, match="api_key_env.*str"):
+        validate_init(data)
+
+
+@pytest.mark.parametrize("value", ["low", "medium", "high", "xhigh"])
+def test_llm_thinking_valid_values(value):
+    data = _valid_init()
+    data["manifest"]["llm"]["provider"] = "codex"
+    data["manifest"]["llm"]["thinking"] = value
+    validate_init(data)
+
+
+@pytest.mark.parametrize("value", ["default", "ultra", 1, None])
+def test_llm_thinking_invalid_values(value):
+    data = _valid_init()
+    data["manifest"]["llm"]["provider"] = "codex"
+    data["manifest"]["llm"]["thinking"] = value
+    with pytest.raises(ValueError, match="manifest.llm.thinking"):
+        validate_init(data)
+
+
+@pytest.mark.parametrize("value", ["high", "default", None])
+def test_llm_thinking_rejected_for_non_codex_provider(value):
+    data = _valid_init()
+    data["manifest"]["llm"]["provider"] = "anthropic"
+    data["manifest"]["llm"]["thinking"] = value
+    with pytest.raises(ValueError, match=r"manifest\.llm\.thinking.*Codex"):
         validate_init(data)
 
 

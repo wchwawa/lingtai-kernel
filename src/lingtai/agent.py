@@ -9,6 +9,10 @@ Capabilities are declared at construction and sealed before start().
 """
 from __future__ import annotations
 
+import json
+
+import json
+
 from typing import Any
 
 from pathlib import Path
@@ -127,28 +131,6 @@ class Agent(BaseAgent):
         # Re-write manifest now that capabilities are registered
         if self._capabilities:
             self._workdir.write_manifest(self._build_manifest())
-
-        # Advisory-first SDK guard wiring (stages 18-20). Installs an advisory
-        # ToolCallGuard from declared bundle manifests onto the Stage-16 seam.
-        # The capability registry is still empty, but Stage 20 default wiring
-        # adds advisory-only core manifests (system/psyche/soul); fail-open.
-        self._wire_bundle_guard()
-
-    def _wire_bundle_guard(self) -> None:
-        """Install the advisory SDK bundle guard onto the Stage-16 seam.
-
-        Thin, fail-open delegation to :func:`lingtai.guard_wiring.wire_agent_guard`.
-        Advisory-first: declared destructive tools warn, never block, by default.
-        Stage 20 makes the core intrinsic tools behaviour-active as warnings;
-        undeclared/non-core tools remain pass-through.
-        Kept as a method so reconstruct (``_setup_from_init``) and any subclass
-        can share one wiring path. Never raises.
-        """
-        try:
-            from .guard_wiring import wire_agent_guard
-            wire_agent_guard(self)
-        except Exception as e:  # fail open — never break construction
-            self._log("guard_wiring_failed", reason=str(e))
 
     def _persist_llm_config(self) -> None:
         """Persist LLM config to llm.json for agent revive.
@@ -1147,20 +1129,45 @@ class Agent(BaseAgent):
         # init.json predates this field cooperatively share the network-wide
         # 60 RPM cap by default. Set to 0 in init.json to disable gating.
         new_max_rpm = m.get("max_rpm", 60)
+        # Pass working_dir so a Codex agent's per-agent session/thread identity
+        # (the agent path) is resolved into the provider defaults. The agent
+        # path anchor is stable across refresh, but #406 makes start/refresh one
+        # of the two cache-affinity rotate triggers: the Codex adapter stamps a
+        # fresh epoch at construction, so a live refresh must REBUILD the adapter
+        # to rotate the current id (see codex_force_rebuild below).
         new_provider_defaults = build_provider_defaults_from_manifest_llm(
-            llm, max_rpm=new_max_rpm, agent_init_path=self._working_dir / "init.json"
+            llm, max_rpm=new_max_rpm, working_dir=self._working_dir
         )
 
+        new_provider_defaults_bucket = (new_provider_defaults or {}).get(
+            new_provider.lower(), {}
+        )
         cur_provider_defaults_bucket = getattr(
             self.service, "_provider_defaults", {}
         ).get(new_provider.lower(), {})
+        # Codex start/refresh is a cache-affinity rotate trigger (Jason's final
+        # #406 semantics): the adapter epoch-stamps the *current* affinity id at
+        # construction, so the 8-hit stalled-cache shuffle only becomes active
+        # once a live refresh REBUILDS the adapter at a fresh epoch. The agent
+        # path anchor is stable across refresh, so the provider-defaults bucket
+        # is byte-identical and the boot-epoch adapter (with its stale current
+        # id) would otherwise survive untouched — exactly the bug where the
+        # shuffle never went live. A *live* refresh is one that replays existing
+        # history (``saved_interface is not None``); boot has no prior session
+        # and already builds a fresh adapter, so it is excluded to avoid a
+        # redundant double-build.
+        codex_force_rebuild = (
+            new_provider.lower() == "codex" and saved_interface is not None
+        )
+        # Compare the resolved provider-defaults bucket as a whole so explicit
+        # init.json changes (codex_session_id/anchor, default_headers,
+        # compact_threshold, max_rpm, api_compat, etc.) rebuild coherently.
         if (
-            new_provider != self.service.provider
+            codex_force_rebuild
+            or new_provider != self.service.provider
             or new_model != self.service.model
             or new_base_url != getattr(self.service, "_base_url", None)
-            or new_max_rpm != cur_provider_defaults_bucket.get("max_rpm", 0)
-            or llm.get("api_compat") != cur_provider_defaults_bucket.get("api_compat")
-            or (new_provider_defaults or {}).get(new_provider.lower(), {}).get("agent_init_path") != cur_provider_defaults_bucket.get("agent_init_path")
+            or new_provider_defaults_bucket != cur_provider_defaults_bucket
         ):
             self.service = LLMService(
                 provider=new_provider, model=new_model,
@@ -1194,6 +1201,7 @@ class Agent(BaseAgent):
             language=m.get("language", "en"),
             activeness=m.get("activeness", "balanced"),
             context_limit=m.get("context_limit"),
+            thinking=llm.get("thinking", "high"),
             molt_pressure=m.get("molt_pressure", 0.8),
             molt_prompt=m.get("molt_prompt", ""),
             snapshot_interval=m.get("snapshot_interval"),
@@ -1205,6 +1213,15 @@ class Agent(BaseAgent):
         )
         self._soul_delay = max(1.0, self._config.soul_delay)
         self._session._config = self._config
+
+        # Reload large-result notification threshold from init.json.
+        # Default 3000; 0 disables notifications entirely.  An explicit
+        # manifest value overrides the default (config override preserved).
+        raw_threshold = m.get("summarize_notification_threshold")
+        if isinstance(raw_threshold, int) and not isinstance(raw_threshold, bool) and raw_threshold >= 0:
+            self._summarize_notification_threshold = raw_threshold
+        else:
+            self._summarize_notification_threshold = 3000
 
         # Reload all prompt sections (covenant, character, principle,
         # procedures, brief, rules, pad, comment) from init.json and disk.
@@ -1297,11 +1314,6 @@ class Agent(BaseAgent):
 
         # Re-write manifest and identity
         self._update_identity()
-
-        # Re-wire the advisory SDK bundle guard for the reconstructed capability
-        # set (stage 18, C3). Reconstruct rebuilds `_capabilities` from scratch,
-        # so re-derive the guard from the new manifests; fail-open.
-        self._wire_bundle_guard()
 
         # Re-seal
         self._sealed = True
@@ -1444,6 +1456,22 @@ class Agent(BaseAgent):
         else:
             self._prompt_manager.delete_section("procedures")
 
+        # --- Runtime guidance mirror ---
+        # `_meta.guidance` is latest-only tool-result metadata, but the TUI
+        # also needs a filesystem-visible copy. Mirror the packaged prompt
+        # resource on every boot/refresh, just like substrate/procedures mirrors.
+        guidance_file = system_dir / "guidance.json"
+        try:
+            from importlib.resources import files
+            from lingtai_kernel.meta_block import validate_runtime_guidance
+
+            guidance_text = files("lingtai.prompts").joinpath("guidance.json").read_text(encoding="utf-8")
+            guidance_payload = json.loads(guidance_text)
+            validate_runtime_guidance(guidance_payload)
+            guidance_file.write_text(json.dumps(guidance_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception:
+            if not guidance_file.is_file():
+                guidance_file.write_text("{}\n", encoding="utf-8")
         # --- Brief (externally-maintained, written by secretary) ---
         brief = data.get("brief", "")
         brief_file = system_dir / "brief.md"

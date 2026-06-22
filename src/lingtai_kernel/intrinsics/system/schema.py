@@ -14,7 +14,7 @@ def get_schema(lang: str = "en") -> dict:
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["refresh", "sleep", "lull", "interrupt", "suspend", "cpr", "clear", "nirvana", "presets", "dismiss", "notification"],
+                "enum": ["refresh", "sleep", "lull", "interrupt", "suspend", "cpr", "clear", "nirvana", "presets", "summarize"],
                 "description": t(lang, "system_tool.action_description"),
             },
             "reason": {
@@ -33,21 +33,23 @@ def get_schema(lang: str = "en") -> dict:
                 "type": "boolean",
                 "description": t(lang, "system_tool.revert_preset_description"),
             },
-            "channel": {
-                "type": "string",
-                "description": t(lang, "system_tool.channel_description"),
-            },
-            "force": {
-                "type": "boolean",
-                "description": t(lang, "system_tool.force_description"),
-            },
-            "event_id": {
-                "type": "string",
-                "description": t(lang, "system_tool.event_id_description"),
-            },
-            "ref_id": {
-                "type": "string",
-                "description": t(lang, "system_tool.ref_id_description"),
+            "items": {
+                "type": "array",
+                "description": t(lang, "system_tool.items_description"),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool_call_id": {
+                            "type": "string",
+                            "description": "The id of the prior tool-result block to summarize.",
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Your agent-authored summary of that tool result.",
+                        },
+                    },
+                    "required": ["tool_call_id", "summary"],
+                },
             },
         },
         "required": ["action"],

@@ -64,25 +64,50 @@ def register_all_adapters() -> None:
         kw.pop("model", None)
         kw.pop("api_key", None)  # ignore env-resolved key
         kw.pop("base_url", None)  # we set our own
+        # Per-agent Codex REST cache-affinity header config (issue #378). The
+        # host wiring (service.build_provider_defaults_from_manifest_llm) passes
+        # down the agent path as ``codex_session_anchor`` by default; the adapter
+        # hashes it to one 8-char value used byte-identically for session_id,
+        # thread_id, and prompt_cache_key, so a normal Codex agent sends stable
+        # per-agent headers. ``codex_thread_salt`` is forwarded only as a legacy
+        # pass-through (it no longer derives a separate thread). The adapter has
+        # no per-agent identity of its own; absent these keys (e.g. a bare
+        # service built in a test) it sends no session/thread headers.
+        d = defaults or {}
+        codex_id_kw: dict = {}
+        for cfg_key in ("codex_session_id", "codex_session_anchor", "codex_thread_salt"):
+            val = d.get(cfg_key)
+            if val is not None:
+                codex_id_kw[cfg_key] = val
         mgr = CodexTokenManager()
         adapter = CodexOpenAIAdapter(
             api_key=mgr.get_access_token(),
             base_url="https://chatgpt.com/backend-api/codex",
             use_responses=True,
             force_responses=True,
-            agent_init_path=kw.get("agent_init_path"),
+            # The user's own ChatGPT account id (sent as the ``ChatGPT-Account-ID``
+            # header when present). Read from their OAuth auth data; ``None`` when
+            # unavailable. Does NOT impersonate the official Codex CLI.
+            codex_account_id=mgr.get_account_id(),
+            **codex_id_kw,
         )
         # Store the token manager so we can refresh before each API call.
         # The openai SDK's client.api_key is mutable — we update it in-place.
         adapter._codex_token_mgr = mgr
+        def _refresh_codex_auth():
+            # Keep the access token current (refreshes on disk if near expiry) and
+            # re-read the account id so a refresh that changes it stays current on
+            # sessions built afterwards. No token/account value is logged.
+            adapter._client.api_key = mgr.get_access_token()
+            adapter.codex_account_id = mgr.get_account_id()
         _orig_create_chat = adapter.create_chat
         def _refreshing_create_chat(*a, **kwa):
-            adapter._client.api_key = mgr.get_access_token()
+            _refresh_codex_auth()
             return _orig_create_chat(*a, **kwa)
         adapter.create_chat = _refreshing_create_chat
         _orig_generate = adapter.generate
         def _refreshing_generate(*a, **kwa):
-            adapter._client.api_key = mgr.get_access_token()
+            _refresh_codex_auth()
             return _orig_generate(*a, **kwa)
         adapter.generate = _refreshing_generate
         return adapter

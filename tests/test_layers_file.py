@@ -7,14 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from lingtai.agent import Agent
+from tests._service_helpers import make_gemini_mock_service as make_mock_service
 
 
-def make_mock_service():
-    svc = MagicMock()
-    svc.get_adapter.return_value = MagicMock()
-    svc.provider = "gemini"
-    svc.model = "gemini-test"
-    return svc
 
 
 def test_file_sugar_expands_to_five(tmp_path):
@@ -136,10 +131,10 @@ def test_base_agent_has_no_file_intrinsics(tmp_path):
 
 
 def test_base_agent_kernel_only(tmp_path):
-    """BaseAgent should have exactly 4 intrinsics: email, system, psyche, soul."""
+    """BaseAgent should have exactly 5 intrinsics: email, system, psyche, soul, notification."""
     from lingtai_kernel.base_agent import BaseAgent
     agent = BaseAgent(service=make_mock_service(), agent_name="test", working_dir=tmp_path / "test")
-    assert set(agent._intrinsics.keys()) == {"email", "system", "psyche", "soul"}
+    assert set(agent._intrinsics.keys()) == {"email", "system", "psyche", "soul", "notification"}
     agent.stop(timeout=1.0)
 
 

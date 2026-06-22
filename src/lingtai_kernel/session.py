@@ -154,7 +154,7 @@ class SessionManager:
                 system_prompt=self._build_system_prompt_fn(),
                 tools=self._build_tool_schemas_fn() or None,
                 model=self._config.model or self._llm_service.model,
-                thinking="high",
+                thinking=self._config.thinking or "high",
                 agent_type=self._display_name,
                 tracked=True,
                 interaction_id=self._interaction_id,
@@ -170,7 +170,7 @@ class SessionManager:
             system_prompt=self._build_system_prompt_fn(),
             tools=self._build_tool_schemas_fn() or None,
             model=self._config.model or self._llm_service.model,
-            thinking="high",
+            thinking=self._config.thinking or "high",
             agent_type=self._display_name,
             tracked=tracked,
             provider=self._config.provider,
@@ -257,6 +257,8 @@ class SessionManager:
         provider_wait_ms = _elapsed_ms(provider_start)
 
         response.api_call_id = api_call_id
+        if response.usage is not None:
+            response.usage.extra.setdefault("api_call_id", api_call_id)
         self._track_usage(
             response,
             timing_fields={
@@ -357,7 +359,10 @@ class SessionManager:
             usage = UsageMetadata(
                 input_tokens=estimated_input,
                 output_tokens=estimated_output,
+                extra=dict(getattr(response.usage, "extra", {}) or {}),
             )
+            if response.api_call_id:
+                usage.extra.setdefault("api_call_id", response.api_call_id)
             response = LLMResponse(
                 text=response.text,
                 tool_calls=response.tool_calls,

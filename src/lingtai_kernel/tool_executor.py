@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .llm.base import ToolCall
 from .loop_guard import LoopGuard
-from .meta_block import stamp_meta
+from .meta_block import stamp_meta, now_iso_plain
 from .tool_result_artifacts import (
     PREVENTIVE_MAX_CHARS as _DEFAULT_MAX_RESULT_CHARS,
     spill_oversized_result as _spill_oversized_result,
@@ -23,6 +23,32 @@ from .types import UnknownToolError
 # results are bounded by the character-based spill boundary in
 # ``tool_result_artifacts.py``.
 _DEFAULT_MAX_RESULT_BYTES = 50_000
+
+
+def _resolve_max_result_chars(value: int) -> int:
+    """Clamp executor result cap to the non-configurable hard ceiling.
+
+    Callers may choose a smaller cap for tests or embedded runtimes, but cannot
+    raise provider-visible tool results above PREVENTIVE_MAX_CHARS.
+    """
+    return value if type(value) is int and 0 < value <= _DEFAULT_MAX_RESULT_CHARS else _DEFAULT_MAX_RESULT_CHARS
+
+
+def _resolve_hint_threshold(value: int | None) -> int:
+    """Resolve the large-result hint threshold from an optional caller-supplied value.
+
+    ``None`` → default (``DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD`` from messaging).
+    ``<= 0`` → 0, meaning the hint is disabled.
+    Non-int or invalid → fall back conservatively to the default.
+    """
+    from .base_agent.messaging import DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+    if value is None:
+        return DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+    if not (type(value) is int):
+        return DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+    if value <= 0:
+        return 0
+    return value
 
 
 class ToolExecutor:
@@ -41,6 +67,7 @@ class ToolExecutor:
         working_dir: Path | str | None = None,
         max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
         tool_call_guard: ToolCallGuard | None = None,
+        summarize_notification_threshold: int | None = None,
     ) -> None:
         self._dispatch_fn = dispatch_fn
         self._make_tool_result_fn = make_tool_result_fn
@@ -51,9 +78,12 @@ class ToolExecutor:
         self._max_result_bytes = max_result_bytes
         self._meta_fn = meta_fn or (lambda: {})
         self._working_dir = Path(working_dir) if working_dir is not None else None
-        self._max_result_chars = max_result_chars
+        self._max_result_chars = _resolve_max_result_chars(max_result_chars)
         self._tool_call_guard = tool_call_guard or ToolCallGuard()
         self._current_api_call_id: str | None = None
+        self._summarize_notification_threshold = _resolve_hint_threshold(
+            summarize_notification_threshold
+        )
 
     def _tool_trace_id(self, tc: ToolCall) -> str:
         """Return the stable trace id for one top-level tool-call execution.
@@ -263,18 +293,110 @@ class ToolExecutor:
         return formatted[-max_chars:]
 
     def _attach_tool_call_progress(self, result: Any) -> Any:
-        """Attach ACTIVE-turn tool-call progress metadata when possible.
+        """Attach the batch-scoped ACTIVE-turn progress *notice* when present.
 
-        Tool-result metadata is already dictionary-based in LingTai's main
-        result path.  Preserve non-dict payloads to avoid changing legacy
-        scalar tool semantics.
+        The running counter (``active_turn_tool_calls``) is intentionally NOT
+        written here: it is latest-only state and lives under
+        ``_meta.agent_meta.active_turn_tool_calls`` (stamped by
+        ``attach_active_runtime`` at the tool-batch boundary).  Repeating the
+        counter on every result left stale snapshots in history.
+
+        The ``active_turn_tool_call_notice`` is a transient soft self-check that
+        the guard only emits when a notice interval is crossed and clears after
+        the batch — it is genuine batch-scoped advisory text the model should see
+        on the result that triggered it, so it is preserved here.
+
+        Non-dict payloads are left unchanged to avoid mutating legacy scalar
+        tool semantics.
         """
         if isinstance(result, dict):
-            result.update(self._guard.progress_metadata())
+            progress = self._guard.progress_metadata()
+            notice = progress.get("active_turn_tool_call_notice")
+            if notice:
+                result["active_turn_tool_call_notice"] = notice
         return result
 
-    @staticmethod
-    def _append_advisory(result: Any, advisory: dict[str, Any] | None) -> Any:
+    # Kernel-injected auxiliary keys that are NOT part of the tool's own
+    # substantive payload. Excluded from the result-intrinsic
+    # ``_meta.tool_meta.char_count`` count so size reflects the tool output, not
+    # metadata layered on after.  The unified ``_meta`` envelope holds
+    # tool_meta/agent_meta/guidance/notifications/notification_guidance; the
+    # remaining keys are transient top-level scaffolding/advisories.
+    _AUX_RESULT_KEYS = (
+        "_meta",
+        "_runtime_pending",
+        "_advisory",
+        "active_turn_tool_calls",
+        "active_turn_tool_call_notice",
+    )
+
+    def _intrinsic_char_count(self, result: dict) -> int:
+        """Serialized size of the result excluding kernel auxiliary keys.
+
+        Builds a shallow copy without the aux keys (see ``_AUX_RESULT_KEYS``) and
+        measures that, so the count is stable regardless of which metadata blocks
+        happen to be present when ``_meta.tool_meta`` is stamped.
+        """
+        import json as _json
+        intrinsic = {k: v for k, v in result.items() if k not in self._AUX_RESULT_KEYS}
+        try:
+            return len(_json.dumps(intrinsic, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            return 0
+
+    def _attach_tool_block(
+        self,
+        result: Any,
+        *,
+        tool_call_id: str | None,
+        elapsed_ms: int | float,
+        spilled_char_count: int | None = None,
+        status: str | None = None,
+    ) -> Any:
+        """Inject the permanent ``_meta.tool_meta`` identity block into dict results.
+
+        This block is tiny, written once, and survives context history. It records
+        facts intrinsic to this specific tool result invocation. The tool name is
+        intentionally omitted because it already appears on the ToolCallBlock.
+
+        Fields:
+          id                  — tool_call_id (or "<unknown>")
+          timestamp           — ISO completion timestamp
+          char_count          — current model-visible serialized size: the kernel
+                                ``_meta`` envelope and transient top-level
+                                scaffolding (``_runtime_pending``, ``_advisory``,
+                                batch progress notice) are excluded from the count.
+          elapsed_ms          — execution time in milliseconds
+          spilled_char_count  — original sidecar character count when a spill occurred;
+                                omitted for ordinary non-spilled results
+          status              — "error" when the result carries status=error; omitted otherwise
+        """
+        if not isinstance(result, dict):
+            return result
+        meta = result.get("_meta")
+        if isinstance(meta, dict) and "tool_meta" in meta:
+            return result
+
+        char_count = self._intrinsic_char_count(result)
+
+        tool_block: dict = {
+            "id": tool_call_id or "<unknown>",
+            "timestamp": now_iso_plain(),
+            "char_count": char_count,
+            "elapsed_ms": int(elapsed_ms),
+        }
+        if spilled_char_count is not None:
+            tool_block["spilled_char_count"] = int(spilled_char_count)
+        if status == "error":
+            tool_block["status"] = "error"
+
+        if not isinstance(meta, dict):
+            meta = {}
+            result["_meta"] = meta
+        meta["tool_meta"] = tool_block
+        return result
+
+    def _append_advisory(self, result: Any, advisory: dict[str, Any] | None) -> Any:
         if not isinstance(result, dict) or not advisory:
             return result
         existing = result.get("_advisory")
@@ -328,12 +450,6 @@ class ToolExecutor:
         }
         if decision.is_structured:
             fields["guard_decision"] = decision.to_payload()
-            # Stage 21: inline a stable, source-labeled advisory summary so a
-            # warn-but-allow decision (e.g. a default core bundle advisory) is
-            # observable and attributable without cracking open guard_decision.
-            summary = decision.advisory_summary()
-            if summary is not None:
-                fields["guard_advisory"] = summary
         self._log_lifecycle("tool_call_approved", **fields)
 
     def _attach_guard_advisory(
@@ -418,7 +534,8 @@ class ToolExecutor:
         )
         collected_errors.append(f"{tc.name}: {result['message']}")
         return self._build_result_message(
-            tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id, status="error"
+            tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
+            status="error", elapsed_ms=elapsed,
         )
 
     def _build_result_message(
@@ -429,18 +546,18 @@ class ToolExecutor:
         tool_call_id: str | None,
         tool_trace_id: str,
         status: str | None = None,
+        elapsed_ms: int | float = 0,
     ) -> Any:
         """Final boundary before a result reaches the LLM wire.
 
-        Adds ACTIVE-turn tool-call progress metadata, then applies the unified
-        character cap (``_DEFAULT_MAX_RESULT_CHARS``): results that serialize
-        beyond the cap are spilled to a sidecar artifact under
-        ``<workdir>/tmp/tool-results/`` and replaced with a compact manifest
-        pointing at the file.  The compact manifest also receives progress
-        metadata so the model-visible result always carries the counter when the
-        payload is dict-shaped.  Notification pairs do not pass through this
-        method — they are synthesized directly by ``BaseAgent._inject_notifications``
-        and bypass ``ToolExecutor``.
+        Attaches ACTIVE-turn progress metadata and the permanent
+        ``_meta.tool_meta`` identity block, then applies the unified character
+        cap: oversized results
+        are spilled to a sidecar artifact and replaced with a compact manifest.
+        The manifest also receives progress metadata when dict-shaped.
+
+        Notification pairs bypass this method — they are synthesized directly
+        by ``BaseAgent._inject_notifications``.
         """
         self._attach_tool_call_progress(result)
         capped = _spill_oversized_result(
@@ -451,7 +568,10 @@ class ToolExecutor:
             working_dir=self._working_dir,
         )
         spilled = capped is not result
+        spilled_char_count = None
         if spilled:
+            if isinstance(capped, dict) and isinstance(capped.get("original_char_count"), int):
+                spilled_char_count = capped["original_char_count"]
             self._attach_tool_call_progress(capped)
         if spilled and self._logger_fn is not None:
             try:
@@ -465,6 +585,14 @@ class ToolExecutor:
                 )
             except Exception:
                 pass
+        # Attach permanent _meta.tool_meta identity block to the final (possibly spilled) result.
+        self._attach_tool_block(
+            capped,
+            tool_call_id=tool_call_id,
+            elapsed_ms=elapsed_ms,
+            spilled_char_count=spilled_char_count,
+            status=status,
+        )
         msg = self._make_tool_result_fn(tool_name, capped, tool_call_id=tool_call_id)
         self._log_lifecycle(
             "tool_result_model_visible",
@@ -634,7 +762,7 @@ class ToolExecutor:
                 )
                 result_msg = self._build_result_message(
                     tc.name, err_result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status="error",
+                    status="error", elapsed_ms=timer.elapsed_ms,
                 )
                 collected_errors.append(f"{tc.name}: {err_result['message']}")
                 return result_msg, False, ""
@@ -712,13 +840,13 @@ class ToolExecutor:
                 intercept_text = result.get("text", "")
                 result_msg = self._build_result_message(
                     tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status=status,
+                    status=status, elapsed_ms=timer.elapsed_ms,
                 )
                 return result_msg, True, intercept_text
 
             result_msg = self._build_result_message(
                 tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                status=status,
+                status=status, elapsed_ms=timer.elapsed_ms,
             )
 
             if isinstance(result, dict) and result.get("status") == "error":
@@ -726,7 +854,10 @@ class ToolExecutor:
                 collected_errors.append(f"{tc.name}: {err_msg}")
 
             if on_result_hook is not None:
-                intercept = on_result_hook(tc.name, args, result)
+                hook_result = getattr(result_msg, "content", None)
+                if hook_result is None:
+                    hook_result = result_msg.get("result", result_msg) if isinstance(result_msg, dict) else result_msg
+                intercept = on_result_hook(tc.name, args, hook_result, tool_call_id=tc_id)
                 if intercept is not None:
                     return result_msg, True, intercept
 
@@ -771,7 +902,7 @@ class ToolExecutor:
             )
             result_msg = self._build_result_message(
                 tc.name, err_result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                status="error",
+                status="error", elapsed_ms=timer.elapsed_ms,
             )
             collected_errors.append(f"{tc.name}: {e}")
             return result_msg, False, ""
@@ -850,7 +981,7 @@ class ToolExecutor:
                 )
                 tool_results.append((i, self._build_result_message(
                     tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status="error",
+                    status="error", elapsed_ms=0,
                 )))
                 collected_errors.append(f"{tc.name}: {result['message']}")
             else:
@@ -879,6 +1010,7 @@ class ToolExecutor:
         # Phase 2: Execute in parallel
         results_map: dict[int, Any] = {}
         errors_map: dict[int, dict] = {}
+        elapsed_map: dict[int, int] = {}
 
         def _run_one(
             index: int,
@@ -946,7 +1078,7 @@ class ToolExecutor:
                     exception=type(e).__name__,
                     exception_message=str(e),
                 )
-                return index, err_result
+                return index, err_result, timer.elapsed_ms
             if isinstance(result, dict):
                 stamp_meta(result, self._meta_fn(), timer.elapsed_ms)
                 self._attach_duplicate_advisory(result, verdict)
@@ -980,7 +1112,7 @@ class ToolExecutor:
                 elapsed_ms=timer.elapsed_ms,
                 result=result,
             )
-            return index, result
+            return index, result, timer.elapsed_ms
 
         pool = ThreadPoolExecutor(max_workers=len(to_execute))
         try:
@@ -993,8 +1125,9 @@ class ToolExecutor:
                     pool.shutdown(wait=False, cancel_futures=True)
                     return [], False, ""
                 try:
-                    idx, result = future.result()
+                    idx, result, elapsed_ms = future.result()
                     results_map[idx] = result
+                    elapsed_map[idx] = elapsed_ms
                 except Exception as e:
                     idx = futures[future]
                     tc_entry = next(
@@ -1113,16 +1246,31 @@ class ToolExecutor:
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
-        # Phase 3: Build result messages (sequential)
+        def _elapsed_ms_from_result(result: Any) -> int:
+            if not isinstance(result, dict):
+                return 0
+            pending = result.get("_runtime_pending")
+            if isinstance(pending, dict):
+                pending_elapsed = pending.get("elapsed_ms")
+                if isinstance(pending_elapsed, (int, float)):
+                    return int(pending_elapsed)
+            elapsed = result.get("elapsed_ms", 0)
+            return int(elapsed) if isinstance(elapsed, (int, float)) else 0
+
+        # Phase 3: Build result messages (sequential) and invoke the result hook.
+        # The hook sees results in input order (same as sequential execution) so
+        # notification/intercept semantics are consistent across both paths.
         for i, tc, args, trace_id, verdict, decision, proposal in to_execute:
             tc_id = getattr(tc, "id", None)
             if i in results_map:
                 result = results_map[i]
                 status = result.get("status", "success") if isinstance(result, dict) else "success"
-                tool_results.append((i, self._build_result_message(
+                _elapsed = elapsed_map.get(i, _elapsed_ms_from_result(result))
+                result_msg = self._build_result_message(
                     tc.name, result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status=status,
-                )))
+                    status=status, elapsed_ms=_elapsed,
+                )
+                tool_results.append((i, result_msg))
                 if isinstance(result, dict) and result.get("status") == "error":
                     err_msg = result.get("message", "unknown error")
                     collected_errors.append(f"{tc.name}: {err_msg}")
@@ -1133,12 +1281,21 @@ class ToolExecutor:
                         True,
                         result.get("text", ""),
                     )
+                if on_result_hook is not None:
+                    hook_result = getattr(result_msg, "content", None)
+                    if hook_result is None:
+                        hook_result = result_msg.get("result", result_msg) if isinstance(result_msg, dict) else result_msg
+                    intercept = on_result_hook(tc.name, args, hook_result, tool_call_id=tc_id)
+                    if intercept is not None:
+                        tool_results.sort(key=lambda x: x[0])
+                        return [r for _, r in tool_results], True, intercept
             elif i in errors_map:
                 err_result = errors_map[i]
                 err_msg = str(err_result.get("message", "unknown error"))
+                _elapsed = elapsed_map.get(i, _elapsed_ms_from_result(err_result))
                 tool_results.append((i, self._build_result_message(
                     tc.name, err_result, tool_call_id=tc_id, tool_trace_id=trace_id,
-                    status="error",
+                    status="error", elapsed_ms=_elapsed,
                 )))
                 collected_errors.append(f"{tc.name}: {err_msg}")
 

@@ -1,15 +1,24 @@
 """Tests for meta_block — unified per-turn metadata injection."""
 from __future__ import annotations
 
+import json
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from lingtai_kernel.meta_block import (
+    GuidanceSchemaError,
     attach_active_notifications,
+    attach_active_runtime,
     build_meta,
+    build_meta_readme,
+    build_guidance_with_meta_readme,
+    build_runtime_guidance,
     clear_active_notification_holder,
     render_meta,
     stamp_meta,
+    validate_runtime_guidance,
 )
 from lingtai_kernel.llm.interface import ToolResultBlock
 
@@ -52,6 +61,71 @@ def test_build_meta_time_blind_regardless_of_timezone_awareness():
     meta = build_meta(agent)
     assert "current_time" not in meta
     assert meta["context"]["system_tokens"] == -1
+
+
+def test_build_meta_counts_current_tool_result_chars_excluding_meta():
+    formal_payload = {"payload": "X" * 1200}
+    tool_block = ToolResultBlock(
+        id="tc-history",
+        name="bash",
+        content={
+            **formal_payload,
+            "_meta": {
+                "notifications": {"system": {"body": "N" * 1000}},
+                "guidance": {
+                    "sections": [
+                        {"id": "meta_readme", "title": "_meta envelope readme", "body": ""}
+                    ]
+                },
+            },
+        },
+    )
+    agent = _fake_agent()
+    agent._config.context_limit = 1_000_000
+    agent._cached_sys_prompt_tokens = 0
+    agent._cached_tool_schema_tokens = 0
+    agent._session = SimpleNamespace(
+        _token_decomp_dirty=False,
+        _system_prompt_tokens=0,
+        _tools_tokens=0,
+        _context_tokens=0,
+        _latest_input_tokens=0,
+        _tool_schema_tokens=0,
+        _context_section_tokens=0,
+        chat=SimpleNamespace(
+            interface=SimpleNamespace(_entries=[SimpleNamespace(content=[tool_block])]),
+            context_window=lambda: 1_000_000,
+        ),
+    )
+
+    meta = build_meta(agent)
+
+    current = meta["current_tool_result_chars"]
+    expected = len(json.dumps(formal_payload, ensure_ascii=False, default=str))
+    assert current["_readme"] == (
+        "listing top 5 tool result longer than 1000 char; "
+        "consider summarize if deemed useless"
+    )
+    assert current["total_chars"] == expected
+    assert current["top_results"] == [{"id": "tc-history", "chars": expected}]
+
+
+def test_build_meta_readme_mentions_tool_result_char_count_and_summarize():
+    readme = build_meta_readme()
+
+    assert "current_tool_result_chars" in readme["agent_meta"]
+    assert "top" in readme["agent_meta"]
+    assert "summarization" in readme["agent_meta"]
+
+
+def test_build_guidance_with_meta_readme_keeps_section_shape_without_packaged_guidance():
+    guidance = build_guidance_with_meta_readme({})
+
+    assert guidance["schema_version"] == 1
+    assert guidance["guidance_version"] == "runtime-meta-readme"
+    assert guidance["render_mode"] == "latest_tool_result_only"
+    assert "meta_readme" not in guidance
+    assert [section["id"] for section in guidance["sections"]] == ["meta_readme"]
 
 
 def _fake_agent_with_lang(lang: str, *, time_awareness: bool = True):
@@ -157,41 +231,53 @@ def test_render_meta_rounds_usage_to_one_decimal():
     assert "7.2%" in result
 
 
-def test_stamp_meta_writes_meta_keys_and_elapsed_ms_in_place():
+def test_stamp_meta_records_pending_snapshot_not_runtime_block():
+    # stamp_meta records a transient _runtime_pending snapshot. The real
+    # _meta.agent_meta/_meta.guidance is promoted only at the tool-batch boundary by
+    # attach_active_runtime (latest-only), so stamp_meta itself never writes
+    # _runtime or flat top-level keys.
     result = {"status": "ok"}
     out = stamp_meta(result, {"current_time": "2026-04-20T10:15:23-07:00"}, 42)
     assert out is result  # in-place
-    assert out["current_time"] == "2026-04-20T10:15:23-07:00"
-    assert out["_elapsed_ms"] == 42
+    pending = out["_runtime_pending"]
+    assert pending["current_time"] == "2026-04-20T10:15:23-07:00"
+    assert pending["elapsed_ms"] == 42
     assert out["status"] == "ok"
+    # No real _meta envelope and no legacy flat keys at the top level.
+    assert "_runtime" not in out
+    assert "current_time" not in out
+    assert "_elapsed_ms" not in out
 
 
-def test_stamp_meta_empty_meta_omits_both_keys():
-    # Time-blind case: empty meta ⇒ no current_time AND no _elapsed_ms.
-    # Preserves stamp_tool_result(time_awareness=False) behavior verbatim.
+def test_stamp_meta_empty_meta_records_nothing():
+    # Time-blind case: empty meta ⇒ no pending snapshot, no live _meta block.
     result = {"status": "ok"}
     out = stamp_meta(result, {}, 42)
     assert out is result
+    assert "_runtime" not in out
+    assert "_runtime_pending" not in out
     assert "current_time" not in out
     assert "_elapsed_ms" not in out
     assert out == {"status": "ok"}
 
 
-def test_stamp_meta_future_fields_are_merged_through():
-    # Forward-compatibility: every key in meta lands on the result.
+def test_stamp_meta_future_fields_are_carried_in_pending():
+    # Forward-compatibility: every key in meta lands in _runtime_pending.
     result = {"status": "ok"}
     meta = {"current_time": "2026-04-20T10:15:23-07:00", "future_field": 123}
     stamp_meta(result, meta, 7)
-    assert result["future_field"] == 123
-    assert result["current_time"] == "2026-04-20T10:15:23-07:00"
-    assert result["_elapsed_ms"] == 7
+    pending = result["_runtime_pending"]
+    assert pending["future_field"] == 123
+    assert pending["current_time"] == "2026-04-20T10:15:23-07:00"
+    assert pending["elapsed_ms"] == 7
 
 
-def test_stamp_meta_elapsed_ms_overrides_meta_key():
-    # Guard: if meta ever carries _elapsed_ms, the measured value wins.
+def test_stamp_meta_elapsed_ms_key_under_pending():
+    # elapsed_ms is written as pending["elapsed_ms"] (not _elapsed_ms).
     result = {}
-    stamp_meta(result, {"_elapsed_ms": 9999}, 7)
-    assert result["_elapsed_ms"] == 7
+    stamp_meta(result, {"current_time": "T"}, 7)
+    assert result["_runtime_pending"]["elapsed_ms"] == 7
+    assert "_elapsed_ms" not in result
 
 
 def _fake_agent_with_session(
@@ -377,8 +463,9 @@ def test_build_meta_usage_matches_get_context_pressure_after_restore():
 # ---------------------------------------------------------------------------
 # notifications field removed 2026-05-02 (Task 11 of system-notification-as-
 # tool-call redesign). System-source notifications are now delivered as
-# synthetic system(action="notification") tool-call pairs spliced via tc_inbox;
-# see docs/plans/2026-05-02-system-notification-as-tool-call.md. Tests for the
+# synthetic notification(action="check") tool-call pairs spliced by
+# BaseAgent._inject_notification_pair (the legacy tc_inbox splice path is
+# dormant); see docs/plans/2026-05-02-system-notification-as-tool-call.md. Tests for the
 # old inbox-drain path lived here and have been removed alongside the field.
 # ---------------------------------------------------------------------------
 
@@ -417,13 +504,15 @@ def test_attach_active_notifications_moves_to_latest_and_clears_prior(tmp_path):
     holder = attach_active_notifications(agent, [first], prior_holder=None)
     assert holder is first.content
     assert "_notifications" not in first.content
-    assert first.content["notifications"] == {
+    # The canonical notification payload nests under the _meta envelope.
+    assert "notifications" not in first.content  # not top-level anymore
+    assert first.content["_meta"]["notifications"] == {
         "email": {
             "header": "1 unread",
             "icon": "📬",
             "priority": "normal",
             "data": {"digest": "Email preview line"},
-            "_notification_guidance": (
+            "notification_guidance": (
                 "This notification block comes from the 'email' notification "
                 "channel. It is kernel-synchronized state, not necessarily a "
                 "human instruction. Identify the source, interpret the channel "
@@ -436,9 +525,9 @@ def test_attach_active_notifications_moves_to_latest_and_clears_prior(tmp_path):
             ),
         }
     }
-    assert "email" in first.content["_notification_guidance"]
-    assert "normal read tool" in first.content["_notification_guidance"]
-    assert "secondary" not in first.content["_notification_guidance"]
+    assert "email" in first.content["_meta"]["notification_guidance"]
+    assert "normal read tool" in first.content["_meta"]["notification_guidance"]
+    assert "secondary" not in first.content["_meta"]["notification_guidance"]
     # Successful stamping must commit the fingerprint, so the IDLE-path
     # synthesized pair will treat this same state as already delivered.
     expected_fp = notification_fingerprint(tmp_path)
@@ -452,10 +541,10 @@ def test_attach_active_notifications_moves_to_latest_and_clears_prior(tmp_path):
         agent, [second], prior_holder=holder
     )
     assert new_holder is second.content
-    assert "notifications" not in first.content
-    assert "_notification_guidance" not in first.content
-    assert "notifications" in second.content
-    assert second.content["notifications"]["email"]["data"] == {"digest": "Email preview line"}
+    # First holder shed its notification keys (and its now-empty _meta envelope).
+    assert "_meta" not in first.content or "notifications" not in first.content["_meta"]
+    assert "notifications" in second.content["_meta"]
+    assert second.content["_meta"]["notifications"]["email"]["data"] == {"digest": "Email preview line"}
 
 
 def test_attach_active_notifications_uses_canonical_mcp_payload(tmp_path):
@@ -473,15 +562,15 @@ def test_attach_active_notifications_uses_canonical_mcp_payload(tmp_path):
 
     attach_active_notifications(agent, [block], prior_holder=None)
 
-    payload = block.content["notifications"]["mcp.telegram"]
+    payload = block.content["_meta"]["notifications"]["mcp.telegram"]
     assert "_notifications" not in block.content
     assert payload["data"]["previews"] == [
         {"from": "alice", "subject": "hello", "preview": "first body"},
         {"from": "bob", "subject": "status", "preview": "second body"},
     ]
-    assert "'mcp.telegram' notification channel" in payload["_notification_guidance"]
-    assert "normal read action" in payload["_notification_guidance"]
-    assert "secondary" not in payload["_notification_guidance"]
+    assert "'mcp.telegram' notification channel" in payload["notification_guidance"]
+    assert "normal read action" in payload["notification_guidance"]
+    assert "secondary" not in payload["notification_guidance"]
 
 
 def test_attach_active_notifications_uses_canonical_system_payload(tmp_path):
@@ -498,7 +587,7 @@ def test_attach_active_notifications_uses_canonical_system_payload(tmp_path):
 
     attach_active_notifications(agent, [block], prior_holder=None)
 
-    payload = block.content["notifications"]["system"]
+    payload = block.content["_meta"]["notifications"]["system"]
     assert "_notifications" not in block.content
     assert payload["data"]["events"] == [
         {"source": "daemon", "body": "Daemon finished with useful details"}
@@ -519,7 +608,7 @@ def test_attach_active_notifications_uses_canonical_soul_payload(tmp_path):
 
     attach_active_notifications(agent, [block], prior_holder=None)
 
-    payload = block.content["notifications"]["soul"]
+    payload = block.content["_meta"]["notifications"]["soul"]
     assert "_notifications" not in block.content
     assert payload["data"]["voices"] == [
         {"source": "insights", "voice": "Remember to verify by email."}
@@ -534,16 +623,17 @@ def test_attach_active_notifications_no_active_clears_prior(tmp_path):
     sentinel_fp = (("sentinel.json", 1, 1),)
     agent._notification_fp = sentinel_fp
 
-    # Seed a prior holder as if a previous batch had stamped one.
-    prior = {"ok": True, "_notifications": {"email": {"header": "stale"}}}
+    # Seed a prior holder as if a previous batch had stamped one (under _meta).
+    prior = {"ok": True, "_meta": {"notifications": {"email": {"header": "stale"}}}}
     new_block = ToolResultBlock(id="t1", name="x", content={"ok": "new"})
 
     result = attach_active_notifications(
         agent, [new_block], prior_holder=prior
     )
     assert result is None
-    assert "_notifications" not in prior
-    assert "_notifications" not in new_block.content
+    # Prior shed its notification keys; the empty _meta envelope is dropped.
+    assert "_meta" not in prior or "notifications" not in prior["_meta"]
+    assert "_meta" not in new_block.content
     # Crucially: with no active notifications, we leave the fp alone so
     # the IDLE-path synthesized pair retains whatever guard state it had.
     assert agent._notification_fp == sentinel_fp
@@ -589,10 +679,8 @@ def test_attach_active_notifications_picks_latest_dict_in_batch(tmp_path):
     )
 
     assert holder is middle.content
-    assert "notifications" in middle.content
-    assert "_notifications" not in middle.content
-    assert "notifications" not in earlier.content
-    assert "_notifications" not in earlier.content
+    assert "notifications" in middle.content["_meta"]
+    assert "_meta" not in earlier.content
     # String content is untouched — and it certainly didn't grow a key.
     assert string_tail.content == "plain text"
 
@@ -606,11 +694,33 @@ def test_attach_active_notifications_picks_latest_dict_in_batch(tmp_path):
 
 
 def test_clear_active_notification_holder_strips_normal_live_holder():
+    # Notification keys live under _meta; stripping them leaves tool_meta and
+    # drops the envelope only if it becomes empty.
     stamped = {
         "ok": True,
-        "_notifications": {"email": {"header": "x"}},
-        "notifications": {"email": {"data": {}}},
-        "_notification_guidance": "live guidance",
+        "_meta": {
+            "tool_meta": {"id": "t1"},
+            "notifications": {"email": {"data": {}}},
+            "notification_guidance": "live guidance",
+        },
+    }
+    agent = SimpleNamespace(_notification_live_holder=stamped)
+
+    clear_active_notification_holder(agent)
+
+    # tool_meta survives; notification keys are gone.
+    assert stamped == {"ok": True, "_meta": {"tool_meta": {"id": "t1"}}}
+    assert agent._notification_live_holder is None
+
+
+def test_clear_active_notification_holder_drops_empty_meta_envelope():
+    # When _meta carried only notification keys, the whole envelope is removed.
+    stamped = {
+        "ok": True,
+        "_meta": {
+            "notifications": {"email": {"data": {}}},
+            "notification_guidance": "live guidance",
+        },
     }
     agent = SimpleNamespace(_notification_live_holder=stamped)
 
@@ -623,8 +733,10 @@ def test_clear_active_notification_holder_strips_normal_live_holder():
 def test_clear_active_notification_holder_skeletonizes_synthesized_holder():
     synthesized = {
         "_synthesized": True,
-        "_notification_guidance": "live guidance",
-        "notifications": {"email": {"data": {"count": 1}}},
+        "_meta": {
+            "notification_guidance": "live guidance",
+            "notifications": {"email": {"data": {"count": 1}}},
+        },
         "current_time": "2026-05-13T00:00:00Z",
     }
     agent = SimpleNamespace(_notification_live_holder=synthesized)
@@ -633,9 +745,9 @@ def test_clear_active_notification_holder_skeletonizes_synthesized_holder():
 
     assert synthesized["_synthesized"] is True
     assert synthesized["_notification_placeholder"] is True
-    assert "kernel-synthesized system(action=notification)" in synthesized["message"]
-    assert "notifications" not in synthesized
-    assert "_notification_guidance" not in synthesized
+    assert "kernel-synthesized notification(action=check)" in synthesized["message"]
+    # Synthesized holder is replaced wholesale with the skeleton — _meta gone.
+    assert "_meta" not in synthesized
     assert agent._notification_live_holder is None
 
 
@@ -685,7 +797,7 @@ def test_attach_active_notifications_can_stamp_post_molt_after_molt_batch(tmp_pa
     holder = attach_active_notifications(agent, [block], prior_holder=None)
 
     assert holder is block.content
-    assert "post-molt" in block.content["notifications"]
+    assert "post-molt" in block.content["_meta"]["notifications"]
     assert agent._notification_fp == notification_fingerprint(tmp_path)
 
 
@@ -701,6 +813,263 @@ def test_attach_active_notifications_stamps_post_molt_with_other_channels(tmp_pa
     holder = attach_active_notifications(agent, [block], prior_holder=None)
 
     assert holder is block.content
-    assert "email" in block.content["notifications"]
-    assert "post-molt" in block.content["notifications"]
+    assert "email" in block.content["_meta"]["notifications"]
+    assert "post-molt" in block.content["_meta"]["notifications"]
     assert agent._notification_fp == notification_fingerprint(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# attach_active_runtime — latest-only moving agent/guidance meta (mirrors the
+# notification holder).  These cover the acceptance criteria directly:
+#   * latest provider-visible result has _meta.agent_meta and _meta.guidance
+#   * previous results lose _runtime when a newer dict result exists
+#   * active_turn_tool_calls lives under _meta.agent_meta (not top-level)
+# ---------------------------------------------------------------------------
+
+
+def _runtime_agent(*, total_calls: int | None = None):
+    """Agent stand-in: attach_active_runtime reads agent._executor.guard.total_calls."""
+    guard = SimpleNamespace(total_calls=total_calls) if total_calls is not None else None
+    executor = SimpleNamespace(guard=guard) if guard is not None else None
+    return SimpleNamespace(_executor=executor)
+
+
+def _stamped_result(meta, elapsed_ms):
+    """A dict result that has been through stamp_meta (carries _runtime_pending)."""
+    result = {"status": "ok"}
+    stamp_meta(result, meta, elapsed_ms)
+    return result
+
+
+def test_attach_active_runtime_counts_current_batch_tool_result_chars():
+    agent = _fake_agent()
+    result = {"payload": "batch"}
+    stamp_meta(result, build_meta(agent), elapsed_ms=12)
+    block = ToolResultBlock(id="tc-batch", name="bash", content=result)
+
+    attach_active_runtime(agent, [block])
+
+    agent_meta = block.content["_meta"]["agent_meta"]
+    current = agent_meta["current_tool_result_chars"]
+    assert current["total_chars"] == len(
+        json.dumps({"payload": "batch"}, ensure_ascii=False, default=str)
+    )
+    assert current["top_results"] == []
+
+
+def test_attach_active_runtime_stamps_latest_with_state_and_guidance():
+    agent = _runtime_agent(total_calls=3)
+    content = _stamped_result({"current_time": "T", "context": {"usage": 0.1}}, 12)
+    block = ToolResultBlock(id="t1", name="x", content=content)
+
+    holder = attach_active_runtime(agent, [block], prior_holder=None)
+
+    assert holder is block.content
+    meta = block.content["_meta"]
+    agent_meta = meta["agent_meta"]
+    assert agent_meta["current_time"] == "T"
+    assert agent_meta["elapsed_ms"] == 12
+    # active_turn_tool_calls is sourced from the guard and lives under agent_meta.
+    assert agent_meta["active_turn_tool_calls"] == 3
+    # guidance comes from guidance.json (package resource) and validates.
+    guidance = meta["guidance"]
+    assert guidance["schema_version"] == 1
+    # The latest-only meta_readme self-describes _meta as a guidance section,
+    # not as a sibling key beside sections.
+    assert "meta_readme" not in guidance
+    sections = {section["id"]: section for section in guidance["sections"]}
+    readme_section = sections["meta_readme"]
+    readme_body = readme_section["body"]
+    assert "`tool_meta`" in readme_body
+    assert "`agent_meta`" in readme_body
+    assert "`guidance`" in readme_body
+    assert "`notification_guidance`" in readme_body
+    assert "`notifications`" in readme_body
+    assert "every tool result" in readme_body.lower()
+    assert "latest" in readme_body.lower()
+    # The transient scaffolding is consumed.
+    assert "_runtime_pending" not in block.content
+    # No top-level active_turn_tool_calls repetition, and no legacy _runtime key.
+    assert "active_turn_tool_calls" not in block.content
+    assert "_runtime" not in block.content
+
+
+def test_attach_active_runtime_moves_to_latest_and_clears_prior():
+    agent = _runtime_agent(total_calls=1)
+
+    first_content = _stamped_result({"current_time": "T1"}, 5)
+    first = ToolResultBlock(id="t1", name="x", content=first_content)
+    holder = attach_active_runtime(agent, [first], prior_holder=None)
+    assert "agent_meta" in first.content["_meta"]
+
+    # Second batch: a new dict result takes over. The prior holder must shed
+    # its agent_meta/guidance; only the newest result carries them.
+    agent = _runtime_agent(total_calls=2)
+    second_content = _stamped_result({"current_time": "T2"}, 6)
+    second = ToolResultBlock(id="t2", name="x", content=second_content)
+    new_holder = attach_active_runtime(agent, [second], prior_holder=holder)
+
+    assert new_holder is second.content
+    # previous loses its agent_meta/guidance (envelope dropped when empty)
+    assert "_meta" not in first.content or "agent_meta" not in first.content["_meta"]
+    assert second.content["_meta"]["agent_meta"]["current_time"] == "T2"
+    assert second.content["_meta"]["agent_meta"]["active_turn_tool_calls"] == 2
+
+
+def test_attach_active_runtime_picks_latest_dict_in_batch():
+    agent = _runtime_agent(total_calls=4)
+    earlier = ToolResultBlock(id="t1", name="x", content=_stamped_result({"current_time": "E"}, 1))
+    middle = ToolResultBlock(id="t2", name="x", content=_stamped_result({"current_time": "M"}, 2))
+    string_tail = ToolResultBlock(id="t3", name="x", content="plain text")
+
+    holder = attach_active_runtime(agent, [earlier, middle, string_tail], prior_holder=None)
+
+    assert holder is middle.content
+    assert middle.content["_meta"]["agent_meta"]["current_time"] == "M"
+    # The earlier dict gets no agent_meta, and its pending scaffolding is stripped.
+    assert "_meta" not in earlier.content
+    assert "_runtime_pending" not in earlier.content
+    assert string_tail.content == "plain text"
+
+
+def test_attach_active_runtime_empty_meta_yields_no_runtime_but_clears_prior():
+    # A time-blind agent's results carry no _runtime_pending (stamp_meta no-op).
+    agent = _runtime_agent(total_calls=1)
+    prior_content = _stamped_result({"current_time": "T1"}, 5)
+    prior = ToolResultBlock(id="t1", name="x", content=prior_content)
+    holder = attach_active_runtime(agent, [prior], prior_holder=None)
+    assert "agent_meta" in prior.content["_meta"]
+
+    # Next batch: result was NOT stamped (no pending). Prior still loses its blocks.
+    blind = ToolResultBlock(id="t2", name="x", content={"status": "ok"})
+    new_holder = attach_active_runtime(agent, [blind], prior_holder=holder)
+
+    assert new_holder is None
+    assert "_meta" not in prior.content
+    assert "_meta" not in blind.content
+
+
+def test_attach_active_runtime_no_dict_target_clears_prior():
+    agent = _runtime_agent(total_calls=1)
+    prior_content = _stamped_result({"current_time": "T1"}, 5)
+    prior = ToolResultBlock(id="t1", name="x", content=prior_content)
+    holder = attach_active_runtime(agent, [prior], prior_holder=None)
+
+    string_only = ToolResultBlock(id="t2", name="x", content="text")
+    new_holder = attach_active_runtime(agent, [string_only], prior_holder=holder)
+
+    assert new_holder is None
+    assert "_meta" not in prior.content
+    assert string_only.content == "text"
+
+
+def test_attach_active_runtime_omits_counter_when_no_guard():
+    agent = _runtime_agent(total_calls=None)  # no executor/guard
+    content = _stamped_result({"current_time": "T"}, 9)
+    block = ToolResultBlock(id="t1", name="x", content=content)
+
+    holder = attach_active_runtime(agent, [block], prior_holder=None)
+
+    assert holder is block.content
+    agent_meta = block.content["_meta"]["agent_meta"]
+    assert agent_meta["current_time"] == "T"
+    assert "active_turn_tool_calls" not in agent_meta
+
+
+# ---------------------------------------------------------------------------
+# guidance.json schema validation.
+# ---------------------------------------------------------------------------
+
+
+def _valid_guidance():
+    return {
+        "schema_version": 1,
+        "guidance_version": "0.1.0",
+        "priority": "tail",
+        "render_mode": "latest_tool_result_only",
+        "sections": [
+            {"id": "a", "title": "A", "body": "body a"},
+            {"id": "b", "title": "B", "body": "body b"},
+        ],
+    }
+
+
+def test_packaged_guidance_resource_is_valid():
+    # The shipped guidance.json must validate — this is the test that catches a
+    # malformed packaged resource (build_runtime_guidance degrades silently).
+    guidance = build_runtime_guidance()
+    assert guidance != {}, "packaged guidance.json failed to load/validate"
+    validate_runtime_guidance(guidance)  # must not raise
+    ids = [s["id"] for s in guidance["sections"]]
+    assert len(ids) == len(set(ids)), "section ids must be unique"
+    titles = [s["title"] for s in guidance["sections"]]
+    assert len(titles) == len(set(titles)), "section titles must be unique"
+
+
+def test_validate_runtime_guidance_accepts_well_formed():
+    data = _valid_guidance()
+    assert validate_runtime_guidance(data) is data
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d.pop("schema_version"),
+    lambda d: d.pop("sections"),
+    lambda d: d.update(schema_version="1"),   # wrong type
+    lambda d: d.update(schema_version=True),  # bool is not a valid int here
+    lambda d: d.update(priority=""),          # empty string
+    lambda d: d.update(sections=[]),          # empty list
+    lambda d: d.update(sections="nope"),      # wrong type
+])
+def test_validate_runtime_guidance_rejects_malformed_top_level(mutate):
+    data = _valid_guidance()
+    mutate(data)
+    with pytest.raises(GuidanceSchemaError):
+        validate_runtime_guidance(data)
+
+
+def test_validate_runtime_guidance_rejects_section_missing_field():
+    data = _valid_guidance()
+    data["sections"][0].pop("body")
+    with pytest.raises(GuidanceSchemaError):
+        validate_runtime_guidance(data)
+
+
+def test_validate_runtime_guidance_rejects_duplicate_section_id():
+    data = _valid_guidance()
+    data["sections"][1]["id"] = "a"  # duplicate of sections[0].id
+    with pytest.raises(GuidanceSchemaError):
+        validate_runtime_guidance(data)
+
+
+def test_validate_runtime_guidance_rejects_duplicate_section_title():
+    data = _valid_guidance()
+    data["sections"][1]["title"] = "A"  # duplicate of sections[0].title
+    with pytest.raises(GuidanceSchemaError):
+        validate_runtime_guidance(data)
+
+
+def test_validate_runtime_guidance_rejects_non_dict():
+    with pytest.raises(GuidanceSchemaError):
+        validate_runtime_guidance(["not", "a", "dict"])
+
+
+# ---------------------------------------------------------------------------
+# Regression guard for the parent-identified blocker #1: move_runtime_block was
+# defined but had NO call site, so _runtime was never injected. attach_active_runtime
+# replaces it and MUST be wired into the tool-batch boundary in base_agent.turn.
+# This catches a future "function defined but never called" regression cheaply
+# without standing up a full turn harness.
+# ---------------------------------------------------------------------------
+
+
+def test_attach_active_runtime_is_wired_into_turn_boundary():
+    import inspect
+    from lingtai_kernel.base_agent import turn as _turn
+
+    src = inspect.getsource(_turn)
+    assert "attach_active_runtime(" in src, (
+        "attach_active_runtime must be CALLED at the tool-batch boundary in "
+        "base_agent/turn.py — otherwise _runtime is never injected (blocker #1)."
+    )
+    # The holder attribute the boundary mutates must be referenced too.
+    assert "_runtime_live_holder" in src

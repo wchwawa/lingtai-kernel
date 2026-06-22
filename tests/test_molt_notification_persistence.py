@@ -13,6 +13,9 @@ import json
 from unittest.mock import MagicMock, patch
 
 
+from tests._molt_helpers import write_session_journal as _write_session_journal
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -134,9 +137,11 @@ class TestNotificationPersistenceAgentMolt:
             mock_entry.content = [tc_block]
             mock_interface.entries = [mock_entry]
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "test summary for molt",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
 
             # Molt should succeed
@@ -193,9 +198,11 @@ class TestNotificationPersistenceAgentMolt:
             mock_entry.content = [tc_block]
             mock_interface.entries = [mock_entry]
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "multi-file test",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
 
             assert result.get("status") == "ok"
@@ -311,9 +318,11 @@ class TestNotificationTrackingStateAfterMolt:
             mock_entry.content = [tc_block]
             mock_interface.entries = [mock_entry]
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "tracking test",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
 
             assert result.get("status") == "ok"

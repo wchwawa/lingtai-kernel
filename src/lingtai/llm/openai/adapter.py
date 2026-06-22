@@ -22,6 +22,7 @@ import httpx
 import openai
 
 from lingtai_kernel.logging import get_logger
+from lingtai_kernel.config import THINKING_LEVELS
 
 from lingtai_kernel.llm.base import (
     ChatSession,
@@ -50,6 +51,125 @@ _CODEX_RESPONSES_TRACE_FILE = "codex_responses_trace.jsonl"
 _AUTO_PROMPT_CACHE_KEY = object()
 
 
+# Codex REST cache-affinity headers (issue #378). The official Codex client
+# sends ``session_id`` / ``thread_id`` headers on its
+# ``/backend-api/codex/responses`` calls; a probe showed they materially
+# improve prompt-cache affinity for repeated full-history replays. The REST
+# endpoint does NOT accept ``previous_response_id`` (``Unsupported
+# parameter``), so stable headers — not delta chaining — are the near-term
+# cache-affinity lever.
+#
+# The header keys MUST be the underscore names ``session_id`` / ``thread_id``
+# exactly as the Codex backend/CLI sends them. Do NOT "normalise" them into
+# hyphenated, HTTP-looking ``session-id`` / ``thread-id``: the Codex backend
+# matches the literal underscore key, so a hyphenated spelling silently loses
+# cache affinity — every request fragments to a cold slot, exploding cache
+# misses and token cost. (This comment block uses the spelling the code must
+# emit; keep prose and code in sync.)
+#
+# For the normal/root main Codex session, the three cache-affinity values are
+# byte-identical and stable for the lifetime of the agent's durable identity:
+#
+#     session_id == thread_id == prompt_cache_key == <8-char agent-path hash>
+#
+# The shared value is a deterministic 8-character lowercase-hex digest of the
+# agent's durable identity anchor (the resolved ``init.json`` / agent path).
+# Ordinary LLM calls, ``api_call_id`` rotation, refresh/rebuild, molt, and
+# clear (same agent path) all leave it unchanged — only a different agent path
+# changes it. We do NOT use the latest ``api_call_id``, molt time, or generated
+# UUIDs for these defaults.
+#
+# IMPORTANT — these identifiers MUST be per-agent. The value anchors on the
+# agent's durable identity (the resolved ``init.json`` path). It must NOT be
+# derived from a global, model-only anchor (e.g.
+# ``prompt_cache_key=lingtai-codex:{model}:v1``): every agent on the same model
+# shares that string, which would collapse all of them onto one
+# session/thread and is exactly the wrong behavior.
+#
+# The adapter layer has no per-agent identity of its own, so the host wiring
+# (``lingtai/llm/service.py:build_provider_defaults_from_manifest_llm``) passes
+# the agent path down by default as ``codex_session_anchor``: a normal Codex
+# agent gets a stable per-agent hash used identically for all three values. The
+# constructor kwargs below are the seam those defaults flow through (and an
+# internal override / testing escape hatch).
+
+
+def _codex_session_id(anchor: str) -> str:
+    """Derive the stable 8-char Codex cache-affinity id from ``anchor``.
+
+    ``anchor`` MUST be a per-agent identity string (e.g. the agent's resolved
+    ``init.json`` / agent-dir path), NOT a global model-only key. The result is
+    a deterministic 8-character lowercase-hex sha256 prefix: the same anchor
+    always yields the same id; distinct anchors differ. The same value is used
+    byte-identically for ``session_id``, ``thread_id``, and the default
+    ``prompt_cache_key`` on the normal/root path.
+    """
+    return hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:8]
+
+# Codex cache-affinity identity is a SINGLE STABLE per-agent value: a pure
+# deterministic hash of the agent's durable identity anchor (the resolved
+# ``init.json`` / agent-dir path), used byte-identically for ``session_id`` /
+# ``thread_id`` / ``prompt_cache_key`` and NEVER changed for the life of the
+# agent's identity. See :func:`_codex_session_id`.
+#
+# Historically there were two churn mechanisms here, both REMOVED because they
+# were empirically counterproductive (the backend routes the prompt cache to a
+# sticky-warm replica off a STABLE session id; changing the id re-rolls the
+# routing and discards the warm slot):
+#   - epoch-stamping the id on every adapter (re)build, and
+#   - a "stalled-cache" rotation that changed the id when the cache rate dipped.
+# Both are gone. The id depends only on the agent path — no time, no epoch, no
+# rotation. The ``codex-cache-key`` request header (first chars of the prompt
+# key) was part of the same churn apparatus and is no longer sent; Codex CLI
+# never sends it either.
+
+
+# Honest client-identity headers for the Codex ``/backend-api/codex/responses``
+# path. The official Codex CLI sends ``originator`` + a Codex ``User-Agent`` to
+# identify itself; LingTai is NOT the Codex CLI, so we identify HONESTLY as
+# LingTai rather than impersonating ``codex_exec`` (impersonating a first-party
+# client risks an OpenAI ToS violation). These are pure identity hints — they do
+# NOT affect prompt caching (verified empirically: cache rate is identical with
+# or without them; only the stable ``session_id``/``thread_id`` header routes the
+# cache slot). The point is account hygiene: hitting the endpoint with a
+# ChatGPT-OAuth token and no recognizable client identity is exactly the traffic
+# anomaly/abuse detection flags. Mirrors the existing honest-User-Agent policy
+# for Kimi in ``LLMService._default_headers_for``. See issue #436.
+_CODEX_ORIGINATOR = "lingtai"
+
+
+def _lingtai_user_agent() -> str:
+    """Return an honest LingTai ``User-Agent`` string, e.g. ``LingTai/0.12.4``.
+
+    Falls back to an unversioned token if the installed package version cannot
+    be resolved (e.g. running from a source tree without metadata).
+    """
+    try:
+        from importlib.metadata import version
+
+        return f"LingTai/{version('lingtai')}"
+    except Exception:
+        return "LingTai"
+
+
+def _codex_installation_id(anchor: str | None) -> str | None:
+    """Return a stable, honest LingTai installation id for Codex metadata.
+
+    Codex CLI sends an opaque UUID-shaped ``x-codex-installation-id``. LingTai
+    must not borrow ``~/.codex/installation_id`` or impersonate the CLI, so we
+    derive our own UUID-shaped identifier from the same non-secret local anchor
+    used for Codex cache affinity. The raw path/anchor is never sent.
+    """
+
+    if not anchor:
+        return None
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"lingtai-codex-installation:{anchor}"))
+
+def _codex_identity_headers() -> dict[str, str]:
+    """Honest client-identity headers sent on every Codex request (see #436)."""
+    return {"originator": _CODEX_ORIGINATOR, "User-Agent": _lingtai_user_agent()}
+
+
 def _base_url_namespace(base_url: str | None) -> str:
     """Return a stable namespace token for an OpenAI-compatible ``base_url``.
 
@@ -66,35 +186,6 @@ def _base_url_namespace(base_url: str | None) -> str:
     return "h" + hashlib.sha256(base_url.encode("utf-8")).hexdigest()[:12]
 
 
-def _resolve_agent_init_path(agent_init_path: str | os.PathLike[str] | None) -> Path | None:
-    """Resolve the local ``init.json`` path used for Codex cache affinity.
-
-    The preferred source is an explicit ``agent_init_path`` injected by the
-    LingTai host. As a fallback for direct construction and daemon preset
-    sessions, use ``LINGTAI_AGENT_DIR/init.json`` when the host environment is
-    present. Returns ``None`` for library/test callers with no agent context,
-    preserving the historical model-scoped default.
-    """
-    candidate: Path | None = None
-    if agent_init_path:
-        candidate = Path(agent_init_path).expanduser()
-    else:
-        agent_dir = os.environ.get("LINGTAI_AGENT_DIR")
-        if agent_dir:
-            candidate = Path(agent_dir).expanduser() / "init.json"
-    if candidate is None:
-        return None
-    return candidate.resolve(strict=False)
-
-
-def _agent_init_path_hash(agent_init_path: str | os.PathLike[str] | None) -> str | None:
-    """Return a short non-reversible hash for a resolved agent ``init.json`` path."""
-    resolved = _resolve_agent_init_path(agent_init_path)
-    if resolved is None:
-        return None
-    return hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
-
-
 def _validate_compact_threshold(value: int | None) -> int | None:
     """Normalize the OpenAI Responses auto-compaction threshold.
 
@@ -109,6 +200,18 @@ def _validate_compact_threshold(value: int | None) -> int | None:
     if value <= 0:
         raise ValueError("compact_threshold must be > 0 or None")
     return value
+
+
+def _responses_reasoning_kwargs(thinking: str | None) -> dict[str, dict[str, str]]:
+    """Return OpenAI Responses reasoning kwargs for a configured thinking level."""
+    if thinking in (None, "default"):
+        return {}
+    if thinking not in THINKING_LEVELS:
+        raise ValueError(
+            "OpenAI Responses thinking must be one of "
+            f"{', '.join(THINKING_LEVELS)}, or default"
+        )
+    return {"reasoning": {"effort": thinking}}
 
 
 def _codex_responses_trace_path() -> Path | None:
@@ -1255,12 +1358,10 @@ class OpenAIAdapter(LLMAdapter):
         default_headers: dict | None = None,
         compact_threshold: int | None = 100_000,
         prompt_cache_key: str | bool | None = None,
-        agent_init_path: str | os.PathLike[str] | None = None,
     ):
         self.base_url = base_url
         self._use_responses = use_responses
         self._force_responses = force_responses
-        self._agent_init_path = str(agent_init_path) if agent_init_path else None
         # Prompt-cache-key policy for this adapter's OpenAI-compatible sessions:
         #   None  -> auto-derive a stable, namespaced default per model
         #   str   -> use this exact key for every session (override)
@@ -1395,12 +1496,11 @@ class OpenAIAdapter(LLMAdapter):
                 },
             }
 
-        if thinking != "default":
-            # Responses API takes `reasoning: { effort: ... }`, not the
-            # Chat Completions SDK's flat `reasoning_effort`. Sending the
-            # wrong shape silently drops the field on the OpenAI Responses
-            # endpoint and 400s on Codex's `/backend-api/codex/responses`.
-            extra_kwargs["reasoning"] = {"effort": "high" if thinking == "high" else "low"}
+        # Responses API takes `reasoning: { effort: ... }`, not the Chat
+        # Completions SDK's flat `reasoning_effort`. Sending the wrong shape
+        # silently drops the field on the OpenAI Responses endpoint and 400s
+        # on Codex's `/backend-api/codex/responses`.
+        extra_kwargs.update(_responses_reasoning_kwargs(thinking))
 
         return OpenAIResponsesSession(
             client=self._client,
@@ -1561,7 +1661,136 @@ class CodexResponsesSession(OpenAIResponsesSession):
       * `store=False` is forced — same reason.
       * Streaming is forced (`stream=True` on send/send_stream alike) —
         non-streaming Codex requests return data the SDK can't unmarshal.
+      * Optional stable ``session_id`` / ``thread_id`` request headers are
+        sent for REST prompt-cache affinity (issue #378). They are HTTP
+        headers (``extra_headers``), not request-body fields, and are
+        independent of ``prompt_cache_key`` (both may be sent together). The
+        keys are underscored (``session_id`` / ``thread_id``) to match the
+        Codex backend literally — a hyphenated spelling loses cache affinity.
     """
+
+    def __init__(
+        self,
+        *args,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        account_id: str | None = None,
+        installation_id: str | None = None,
+        metadata_sandbox: str = "lingtai",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        # The user's own ChatGPT account id (decoded upstream from their OAuth
+        # auth data). When present it is sent as the ``ChatGPT-Account-ID`` HTTP
+        # header so the request is attributed to the right ChatGPT account —
+        # this does NOT impersonate the official Codex CLI (we keep the honest
+        # ``originator: lingtai`` / ``User-Agent: LingTai/<ver>`` identity). It
+        # is a non-secret account identifier and is never copied into usage
+        # metadata or logs.
+        self._account_id = account_id if isinstance(account_id, str) and account_id else None
+        self._installation_id = installation_id
+        self._metadata_sandbox = metadata_sandbox or "lingtai"
+        # Codex REST cache-affinity identity: ONE stable per-agent value used
+        # byte-identically for ``prompt_cache_key`` / ``session_id`` /
+        # ``thread_id`` on EVERY request, and NEVER changed for the life of the
+        # session. There is no epoch-stamping and no rotation — the id is a pure
+        # deterministic hash of the agent path (resolved upstream by the adapter
+        # and passed in here). Priority for the single value: ``prompt_cache_key``
+        # (explicit request-body cache key) > ``session_id`` > ``thread_id``.
+        #
+        # The header carve-out (issue #378): ``session_id`` / ``thread_id``
+        # headers route the backend cache slot and MUST be per-agent. The
+        # model-only fallback ``prompt_cache_key`` form
+        # (``lingtai-codex:{model}:v1``) is shared by every agent on a model, so
+        # it is NEVER promoted to headers (that would collapse all agents onto one
+        # slot). Headers are emitted only when an explicit ``session_id`` /
+        # ``thread_id`` was supplied (the per-agent path or a direct-construction
+        # test); a cache-key-only construction (bare/no-anchor) keeps its body
+        # ``prompt_cache_key`` and sends NO headers.
+        self._current_id = self._prompt_cache_key or session_id or thread_id
+        self._prompt_cache_key = self._current_id
+        self._has_header_identity = bool(session_id or thread_id)
+        if self._has_header_identity:
+            self._session_id = self._current_id
+            self._thread_id = self._current_id
+        else:
+            self._session_id = None
+            self._thread_id = None
+
+    def _cache_affinity_headers(self) -> dict[str, str]:
+        """Return the stable ``session_id`` / ``thread_id`` headers, if any.
+
+        The header names use UNDERSCORES (``session_id`` / ``thread_id``) to match
+        what the official Codex CLI sends on its
+        ``/backend-api/codex/responses`` calls (verified by capturing real Codex
+        CLI traffic, 2026-06). This spelling is load-bearing: the Codex backend
+        matches the literal underscore key, so emitting hyphenated
+        ``session-id`` / ``thread-id`` would silently lose cache affinity and
+        fragment every request onto a cold slot (cache/cost explosion). Do NOT
+        rename these to HTTP-looking hyphenated forms. The backend routes the
+        prompt-cache slot to a sticky-warm replica off a STABLE session id; we
+        send one fixed per-agent value for the life of the session and never
+        change it.
+        """
+        headers: dict[str, str] = {}
+        if self._session_id:
+            headers["session_id"] = self._session_id
+        if self._thread_id:
+            headers["thread_id"] = self._thread_id
+        return headers
+
+    def _codex_metadata_headers(self) -> dict[str, str]:
+        """Return honest LingTai Codex metadata headers for this request."""
+
+        if not (self._session_id and self._thread_id):
+            return {}
+        turn_metadata = {
+            "session_id": self._session_id,
+            "thread_id": self._thread_id,
+            "turn_id": str(uuid.uuid4()),
+            "sandbox": self._metadata_sandbox,
+            "turn_started_at_unix_ms": int(time.time() * 1000),
+        }
+        return {
+            "x-client-request-id": str(uuid.uuid4()),
+            "x-codex-window-id": f"{self._session_id}:0",
+            "x-codex-turn-metadata": json.dumps(turn_metadata, separators=(",", ":"), sort_keys=True),
+        }
+
+    def _codex_client_metadata(self) -> dict[str, str]:
+        if not self._installation_id:
+            return {}
+        return {"x-codex-installation-id": self._installation_id}
+
+    def _effective_affinity(self) -> tuple[str | None, dict[str, str]]:
+        """Resolve this request's (prompt_cache_key, headers) pair.
+
+        Always the single stable per-agent id — fixed for the life of the
+        session, used byte-identically for ``prompt_cache_key`` / ``session_id``
+        / ``thread_id`` on every request. No rotation, no epoch, no time
+        dependence.
+        """
+        return self._prompt_cache_key, self._cache_affinity_headers()
+
+    @staticmethod
+    def _usage_extra(
+        affinity_headers: dict[str, str], cache_key: str | None
+    ) -> dict[str, str]:
+        """Build the token-ledger ``UsageMetadata.extra`` for this request.
+
+        Surfaces the ACTUAL current ids used so a stalled-cache rotation is
+        visible in ``token_ledger.jsonl`` alongside the pre-rotation requests.
+        Only the short non-secret affinity ids ride here — no prompt body, no
+        tokens, no OAuth secret.
+        """
+        extra: dict[str, str] = {}
+        if affinity_headers.get("session_id"):
+            extra["codex_session_id"] = affinity_headers["session_id"]
+        if affinity_headers.get("thread_id"):
+            extra["codex_thread_id"] = affinity_headers["thread_id"]
+        if cache_key:
+            extra["codex_prompt_cache_key"] = cache_key
+        return extra
 
     def send(self, message) -> LLMResponse:
         # Force the streaming path — Codex doesn't serve non-streaming JSON.
@@ -1623,6 +1852,18 @@ class CodexResponsesSession(OpenAIResponsesSession):
                 "store": False,
                 **self._extra_kwargs,
             }
+            # Ensure reasoning.encrypted_content is requested so the raw
+            # reasoning item can be preserved for prompt-cache-stable replay.
+            existing_include = kwargs.get("include") or []
+            if isinstance(existing_include, str):
+                existing_include = [existing_include]
+            else:
+                try:
+                    existing_include = list(existing_include)
+                except TypeError:
+                    existing_include = [existing_include]
+            if "reasoning.encrypted_content" not in existing_include:
+                kwargs["include"] = existing_include + ["reasoning.encrypted_content"]
             if self._instructions:
                 kwargs["instructions"] = self._instructions
             if self._tools:
@@ -1634,16 +1875,52 @@ class CodexResponsesSession(OpenAIResponsesSession):
                 kwargs["context_management"] = [
                     {"type": "compaction", "compact_threshold": self._compact_threshold}
                 ]
-            # Opt into Codex prompt caching with a stable key. We send only
+            # Resolve this request's cache-affinity values — the single stable
+            # per-agent id (a pure hash of the agent path). All three levers
+            # (prompt_cache_key / session_id / thread_id) carry the same value on
+            # every request and never change for the life of the session.
+            effective_cache_key, affinity_headers = self._effective_affinity()
+            # Opt into Codex prompt caching with the resolved key. We send only
             # `prompt_cache_key`; the Codex backend rejects `prompt_cache_retention`
             # (Unsupported parameter), so it is deliberately never sent.
-            if self._prompt_cache_key:
-                kwargs["prompt_cache_key"] = self._prompt_cache_key
-
+            if effective_cache_key:
+                kwargs["prompt_cache_key"] = effective_cache_key
+            # REST cache-affinity headers (issue #378). Sent as HTTP headers via
+            # the SDK's per-request ``extra_headers``, never as request-body
+            # fields. ``session_id`` / ``thread_id`` route the per-agent cache
+            # slot and are a single stable per-agent value (never rotated).
+            # Honest client identity (#436) forms the base; cache-affinity and
+            # caller-supplied headers layer on top so they always win.
+            extra_headers = {
+                **_codex_identity_headers(),
+                **affinity_headers,
+                **self._codex_metadata_headers(),
+            }
+            # The user's own ChatGPT account id, when available. Canonical
+            # official spelling ``ChatGPT-Account-ID`` (HTTP header names are
+            # case-insensitive). Attributes the request to the right ChatGPT
+            # account WITHOUT impersonating the official Codex CLI — the honest
+            # ``originator``/``User-Agent`` identity above is unchanged. Omitted
+            # entirely when no account id is known.
+            if self._account_id:
+                extra_headers["ChatGPT-Account-ID"] = self._account_id
+            if extra_headers:
+                kwargs["extra_headers"] = {
+                    **extra_headers,
+                    **kwargs.get("extra_headers", {}),
+                }
+            client_metadata = self._codex_client_metadata()
+            if client_metadata:
+                extra_body = dict(kwargs.get("extra_body") or {})
+                existing_client_metadata = dict(extra_body.get("client_metadata") or {})
+                extra_body["client_metadata"] = {**existing_client_metadata, **client_metadata}
+                kwargs["extra_body"] = extra_body
             acc = StreamingAccumulator()
             response_id = None
             usage = UsageMetadata()
             seen_reasoning_summary_items: set[str] = set()
+            # Raw reasoning item dicts for replay, in provider output order.
+            raw_reasoning_items: list[dict[str, Any]] = []
             trace_path = _codex_responses_trace_path()
 
             stream = self._client.responses.create(**kwargs)
@@ -1665,6 +1942,42 @@ class CodexResponsesSession(OpenAIResponsesSession):
                     trace_path=trace_path,
                 )
                 if accepted_reasoning:
+                    # Capture raw reasoning item when output_item.done carries
+                    # encrypted_content, so it can be replayed verbatim next turn.
+                    if (
+                        event.type == "response.output_item.done"
+                        and getattr(event.item, "type", None) == "reasoning"
+                    ):
+                        enc = getattr(event.item, "encrypted_content", None)
+                        if enc:
+                            item_id = getattr(event.item, "id", None) or ""
+                            summaries = []
+                            for s in getattr(event.item, "summary", None) or []:
+                                summaries.append({
+                                    "type": getattr(s, "type", None),
+                                    "text": getattr(s, "text", None),
+                                })
+                            content = []
+                            for c in getattr(event.item, "content", None) or []:
+                                if hasattr(c, "model_dump"):
+                                    content.append(c.model_dump(exclude_none=True))
+                                elif isinstance(c, dict):
+                                    content.append(c)
+                                else:
+                                    logger.warning(
+                                        "codex.responses.reasoning_content_ignored",
+                                        extra={
+                                            "item_id": item_id,
+                                            "content_type": type(c).__name__,
+                                        },
+                                    )
+                            raw_reasoning_items.append({
+                                "type": "reasoning",
+                                "id": item_id,
+                                "summary": summaries,
+                                "content": content,
+                                "encrypted_content": enc,
+                            })
                     continue
                 if event.type == "response.output_text.delta":
                     acc.add_text(event.delta)
@@ -1683,8 +1996,9 @@ class CodexResponsesSession(OpenAIResponsesSession):
                     if event.response.usage:
                         cached = getattr(event.response.usage, "input_tokens_details", None)
                         cached_tokens = (getattr(cached, "cached_tokens", 0) or 0) if cached else 0
+                        input_tokens = getattr(event.response.usage, "input_tokens", 0) or 0
                         usage = UsageMetadata(
-                            input_tokens=getattr(event.response.usage, "input_tokens", 0) or 0,
+                            input_tokens=input_tokens,
                             output_tokens=getattr(event.response.usage, "output_tokens", 0) or 0,
                             thinking_tokens=getattr(
                                 event.response.usage, "output_tokens_details", None
@@ -1696,6 +2010,9 @@ class CodexResponsesSession(OpenAIResponsesSession):
                             )
                             or 0,
                             cached_tokens=cached_tokens,
+                            extra=self._usage_extra(
+                                affinity_headers, effective_cache_key
+                            ),
                         )
         except Exception:
             # Revert the trailing user entry we just added so the next retry
@@ -1711,9 +2028,31 @@ class CodexResponsesSession(OpenAIResponsesSession):
         # the next request. Without this, the stateless backend would never
         # see the assistant's own prior turns.
         blocks: list = []
-        if result.thoughts:
+        raw_items = raw_reasoning_items
+        if result.thoughts or raw_items:
             joined = "\n".join(t for t in result.thoughts if t)
-            if joined:
+            if raw_items:
+                # Attach every raw reasoning item (with encrypted_content), even
+                # when the provider returned no summary_text. Codex commonly
+                # returns summary=[] with encrypted_content; dropping the block
+                # in that case would lose the cache-stable replay state.
+                for idx, raw_item in enumerate(raw_items):
+                    item_summary_text = "\n".join(
+                        str(s.get("text"))
+                        for s in raw_item.get("summary", [])
+                        if isinstance(s, dict)
+                        and s.get("type") == "summary_text"
+                        and s.get("text")
+                    )
+                    blocks.append(
+                        ThinkingBlock(
+                            text=item_summary_text or (joined if idx == 0 else ""),
+                            provider_data={
+                                "openai_responses_reasoning_item": raw_item,
+                            },
+                        )
+                    )
+            elif joined:
                 blocks.append(ThinkingBlock(text=joined))
         if result.text:
             blocks.append(TextBlock(text=result.text))
@@ -1747,17 +2086,79 @@ class CodexOpenAIAdapter(OpenAIAdapter):
     force_responses=True, base_url='https://chatgpt.com/backend-api/codex'`.
     """
 
+    def __init__(
+        self,
+        *args,
+        codex_session_id: str | None = None,
+        codex_session_anchor: str | None = None,
+        codex_thread_salt: str | None = None,
+        codex_account_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        # Codex REST cache-affinity identity: ONE stable per-agent value used
+        # byte-identically for ``session_id``, ``thread_id``, and the default
+        # ``prompt_cache_key``. It is a PURE deterministic hash of the agent's
+        # durable identity anchor (the resolved ``init.json`` / agent-dir path) —
+        # no epoch, no time, no rotation. The same agent path always yields the
+        # same id across restarts/refresh/molt, so the agent keeps routing to the
+        # same sticky-warm backend cache slot. The adapter has no per-agent
+        # identity of its own; the host wiring passes the anchor down by default
+        # via these kwargs (also an internal override / testing escape hatch):
+        #
+        #   codex_session_id=str     -> use this exact string verbatim for all
+        #                               three (explicit operator override)
+        #   codex_session_anchor=str -> hash the per-agent anchor (the resolved
+        #                               init.json path) into the id for all three
+        #   (neither set)            -> no session_id/thread_id (bare/test path)
+        #
+        # ``codex_thread_salt`` is accepted only as a legacy manifest
+        # pass-through; it is intentionally NOT used to derive a separate thread
+        # id. The root/main thread tracks the session id exactly so the three
+        # values stay byte-identical.
+        self._codex_session_anchor = (
+            str(codex_session_anchor) if codex_session_anchor else None
+        )
+        if codex_session_id:
+            # Explicit override: used verbatim.
+            self._codex_id: str | None = str(codex_session_id)
+        elif self._codex_session_anchor:
+            self._codex_id = _codex_session_id(self._codex_session_anchor)
+        else:
+            self._codex_id = None  # no per-agent identity -> no headers
+        self._codex_thread_salt = codex_thread_salt  # legacy pass-through; unused
+        installation_anchor = self._codex_session_anchor or self._codex_id
+        self._codex_installation_id = _codex_installation_id(installation_anchor)
+        # The user's own ChatGPT account id, resolved upstream from their OAuth
+        # auth data (explicit ``account_id`` field or decoded id_token claim).
+        # Mutable so the token-refresh path can keep it current if refreshed
+        # auth data changes it. ``None`` -> no ``ChatGPT-Account-ID`` header.
+        self.codex_account_id: str | None = (
+            str(codex_account_id) if codex_account_id else None
+        )
+
+    def _resolve_codex_ids(self, model: str) -> tuple[str | None, str | None]:
+        """Resolve the (session_id, thread_id) headers for ``model``.
+
+        Returns ``(None, None)`` only when no per-agent identity was passed in
+        (e.g. a bare adapter built directly in a test). In the normal host path
+        the agent path is always supplied, so both ids are the same stable
+        per-agent hash — the thread id tracks the session id exactly.
+        """
+        return self._codex_id, self._codex_id
+
     def _default_prompt_cache_key(self, model: str) -> str:
-        # Stable, conservative default so successive Codex turns hit the
-        # backend prompt cache. Keyed by model plus the local agent init.json
-        # path hash so one persistent agent/workstream keeps cache affinity
-        # without leaking machine paths or forcing unrelated agents into the
-        # same Codex cache bucket. `:v2` marks the schema change from the
-        # earlier model-only key. Never paired with `prompt_cache_retention`
-        # (Codex rejects that parameter).
-        init_hash = _agent_init_path_hash(self._agent_init_path)
-        if init_hash:
-            return f"lingtai-codex:{model}:init-{init_hash}:v2"
+        # On the normal/root path the cache key is the SAME per-agent value as
+        # session_id / thread_id — byte-identical, so all three cache-affinity
+        # levers point at one stable slot for the agent's durable identity (a
+        # pure hash of the agent path, never time/epoch dependent). Never paired
+        # with `prompt_cache_retention` (Codex rejects it).
+        #
+        # The model-keyed ``lingtai-codex:{model}:v1`` form survives only for the
+        # truly bare/no-anchor path (e.g. a standalone unit test), where the
+        # adapter has no per-agent identity to hash.
+        if self._codex_id:
+            return self._codex_id
         return f"lingtai-codex:{model}:v1"
 
     def _create_responses_session(
@@ -1791,11 +2192,11 @@ class CodexOpenAIAdapter(OpenAIAdapter):
                 },
             }
 
-        if thinking != "default":
-            extra_kwargs["reasoning"] = {"effort": "high" if thinking == "high" else "low"}
+        extra_kwargs.update(_responses_reasoning_kwargs(thinking))
 
         # Codex's backend doesn't accept context_management compaction —
         # leave compact_threshold unset.
+        session_id, thread_id = self._resolve_codex_ids(model)
         return CodexResponsesSession(
             client=self._client,
             model=model,
@@ -1806,8 +2207,19 @@ class CodexOpenAIAdapter(OpenAIAdapter):
             previous_response_id=None,
             compact_threshold=None,
             interface=interface,
-            # Resolves to an agent-init-path-hashed Codex key by default (see
-            # ``_default_prompt_cache_key``), but honors an explicit override
-            # or a ``prompt_cache_key=False`` disable passed to the adapter.
+            # On the normal/root path this resolves to the SAME stable per-agent
+            # hash as session_id / thread_id (see ``_default_prompt_cache_key``);
+            # it honors an explicit override or a ``prompt_cache_key=False``
+            # disable passed to the adapter. Only the bare/no-anchor path falls
+            # back to ``lingtai-codex:{model}:v1``.
             prompt_cache_key=self._resolve_prompt_cache_key(model),
+            # Stable REST cache-affinity headers: both the per-agent hash,
+            # byte-identical, passed down by the host; ``(None, None)`` only for
+            # a bare/test adapter. Never rotated.
+            session_id=session_id,
+            thread_id=thread_id,
+            # The user's own ChatGPT account id (read fresh from the adapter so a
+            # token refresh that changes it is reflected on newly built sessions).
+            account_id=self.codex_account_id,
+            installation_id=self._codex_installation_id,
         )

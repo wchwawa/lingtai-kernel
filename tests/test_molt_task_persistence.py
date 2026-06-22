@@ -16,6 +16,9 @@ import pytest
 from lingtai_kernel.llm.interface import ChatInterface, TextBlock, ToolCallBlock
 
 
+from tests._molt_helpers import write_session_journal as _write_session_journal
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -116,9 +119,11 @@ class TestContextMoltKeepLast:
             ])
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"
@@ -149,10 +154,12 @@ class TestContextMoltKeepLast:
             ])
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": 0,
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"
@@ -186,10 +193,12 @@ class TestContextMoltKeepLast:
             ])
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": 2,
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"
@@ -232,10 +241,12 @@ class TestContextMoltKeepLast:
 
             # 3 non-system entries (user, assistant, molt-call), but molt-call
             # is excluded from keep_last (replayed separately), so keep all 2
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": 100,
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"
@@ -293,11 +304,13 @@ class TestContextMoltKeepLast:
 
             # keep_last=100 to keep everything, keep_tool_calls names the
             # same tool pair — the overlapping entries should be deduplicated.
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": 100,
                 "keep_tool_calls": [lt_id],
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"
@@ -335,10 +348,12 @@ class TestContextMoltKeepLast:
             _populate_conversation(agent, [("user", "Hi")])
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": "twenty",
+                "session_journal_path": journal_path,
             })
 
             assert "error" in result
@@ -357,10 +372,12 @@ class TestContextMoltKeepLast:
             _populate_conversation(agent, [("user", "Hi")])
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": -5,
+                "session_journal_path": journal_path,
             })
 
             assert "error" in result
@@ -402,11 +419,13 @@ class TestContextMoltKeepLast:
 
             tc_id = _add_molt_call(agent)
 
+            journal_path = _write_session_journal(agent)
             result = _context_molt(agent, {
                 "summary": "Test summary",
                 "_tc_id": tc_id,
                 "keep_last": 2,  # keep last 2 entries
                 "keep_tool_calls": [lt_id],  # also keep the tool pair
+                "session_journal_path": journal_path,
             })
 
             assert result["status"] == "ok"

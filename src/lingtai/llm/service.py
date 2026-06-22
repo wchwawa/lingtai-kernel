@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from lingtai_kernel.llm.base import (
@@ -60,7 +60,27 @@ def _generate_tool_call_id() -> str:
 # api_compat="anthropic" custom providers (e.g. local GLM proxies) to
 # OpenAIAdapter, which then explodes on raw.choices access. See
 # Lingtai-AI/lingtai#112 for the full failure trace.
-_PROVIDER_DEFAULTS_PASS_THROUGH_KEYS = ("api_compat",)
+# ``codex_session_id`` / ``codex_session_anchor`` / ``codex_thread_salt`` carry
+# the agent's per-agent Codex identity down to the adapter, which lets the Codex
+# REST path send stable ``session_id`` / ``thread_id`` cache-affinity headers
+# (issue #378; the underscore spelling is mandatory — the Codex backend matches
+# the literal key, and a hyphenated ``session-id`` / ``thread-id`` would lose
+# cache affinity). The adapter layer has no per-agent identity of its own, so the
+# ``codex_session_anchor`` is normally populated *automatically* for Codex
+# agents from the agent path (see ``build_provider_defaults_from_manifest_llm``);
+# the adapter derives an 8-char agent-path hash from it and uses that value
+# byte-identically for session_id, thread_id, and prompt_cache_key.
+# ``codex_session_id`` / ``codex_thread_salt`` remain available as an internal
+# override / testing escape hatch when set on the manifest ``llm`` block
+# directly. The default path no longer injects ``codex_thread_salt``; the salt
+# no longer derives a separate thread id (the thread tracks the session id), and
+# nothing reads the token ledger to pick the Codex identity.
+_PROVIDER_DEFAULTS_PASS_THROUGH_KEYS = (
+    "api_compat",
+    "codex_session_id",
+    "codex_session_anchor",
+    "codex_thread_salt",
+)
 _PROVIDER_DEFAULTS_PRESERVE_NONE_KEYS = ("compact_threshold",)
 
 
@@ -68,7 +88,7 @@ def build_provider_defaults_from_manifest_llm(
     llm: dict,
     *,
     max_rpm: int,
-    agent_init_path: str | os.PathLike[str] | None = None,
+    working_dir: Path | None = None,
 ) -> dict | None:
     """Convert a manifest.llm block into LLMService.provider_defaults.
 
@@ -76,13 +96,24 @@ def build_provider_defaults_from_manifest_llm(
     configured provider so other providers stay unaffected), or ``None``
     when no fields are set — preserving the historical behavior where
     callers passed ``provider_defaults=None`` for the unconfigured case.
+
+    When ``working_dir`` is given and the provider is Codex, the agent's
+    per-agent Codex identity is injected by default: the ``codex_session_anchor``
+    is the resolved ``init.json`` path (the agent's durable identity anchor). The
+    adapter derives an 8-char agent-path hash from that anchor and uses it
+    byte-identically for ``session_id``, ``thread_id``, and ``prompt_cache_key``.
+    This is the normal path — neither opt-in nor opt-out; a Codex agent gets
+    stable cache-affinity values out of the box. Crucially, this no longer reads
+    the token ledger / ``api_call_id`` or molt time: the same ``working_dir``
+    yields the same defaults regardless of ledger contents, so ordinary calls,
+    refresh/rebuild, molt, and clear (same agent path) never rotate the values.
+    An explicit ``codex_session_id`` / ``codex_session_anchor`` on the manifest
+    ``llm`` block still wins (internal override / testing escape hatch).
     """
     provider_key = llm["provider"].lower()
     per_provider: dict = {}
     if max_rpm > 0:
         per_provider["max_rpm"] = max_rpm
-    if provider_key == "codex" and agent_init_path is not None:
-        per_provider["agent_init_path"] = str(Path(agent_init_path).expanduser().resolve(strict=False))
     user_headers = llm.get("default_headers")
     if isinstance(user_headers, dict) and user_headers:
         # Pass-through; LLMService._default_headers_for honors caller-supplied
@@ -95,6 +126,19 @@ def build_provider_defaults_from_manifest_llm(
     for key in _PROVIDER_DEFAULTS_PRESERVE_NONE_KEYS:
         if key in llm:
             per_provider[key] = llm[key]
+
+    # Default per-agent Codex identity from the agent path only. The adapter
+    # hashes this anchor to one 8-char value shared by session_id, thread_id,
+    # and prompt_cache_key. Manifest-supplied values (handled above) take
+    # precedence; we only fill the gap so the override/testing escape hatch
+    # still works. No token ledger / molt time is consulted.
+    if provider_key == "codex" and working_dir is not None:
+        if "codex_session_id" not in per_provider:
+            per_provider.setdefault(
+                "codex_session_anchor",
+                str((working_dir / "init.json").resolve()),
+            )
+
     return {provider_key: per_provider} if per_provider else None
 
 
@@ -174,14 +218,10 @@ class LLMService(LLMServiceABC):
                 f"If using lingtai, ensure 'import lingtai' runs before creating LLMService."
             )
 
-        extra_kw: dict = {}
-        if p == "codex" and defaults and defaults.get("agent_init_path") is not None:
-            extra_kw["agent_init_path"] = defaults["agent_init_path"]
-
         return factory(
             model=self._model,
             defaults=defaults,
-            **key_kw, **url_kw, **rpm_kw, **headers_kw, **extra_kw,
+            **key_kw, **url_kw, **rpm_kw, **headers_kw,
         )
 
     def _default_headers_for(self, provider: str, defaults: dict | None) -> dict | None:

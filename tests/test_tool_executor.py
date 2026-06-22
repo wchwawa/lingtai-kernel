@@ -5,11 +5,15 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 import lingtai_kernel.tool_executor as tool_executor_module
 from lingtai_kernel.llm.base import ToolCall
+from lingtai_kernel.llm.interface import ToolResultBlock
 from lingtai_kernel.loop_guard import LoopGuard
 from lingtai_kernel.tool_call_guard import GuardDecision, ToolCallGuard
 from lingtai_kernel.tool_executor import ToolExecutor
+from lingtai_kernel.types import UnknownToolError
 
 
 def make_executor(
@@ -23,10 +27,7 @@ def make_executor(
     tool_call_guard=None,
 ):
     if dispatch_fn is None:
-
-        def dispatch_fn(tc):
-            return {"status": "ok", "result": f"ran {tc.name}"}
-
+        dispatch_fn = lambda tc: {"status": "ok", "result": f"ran {tc.name}"}
     make_result = MagicMock(side_effect=lambda name, result, **kw: {"name": name, "result": result})
     guard = guard or LoopGuard(max_total_calls=50)
     return ToolExecutor(
@@ -221,64 +222,6 @@ def test_tool_call_guard_warning_allows_dispatch_and_adds_advisory():
     assert approved["policy"] == "warn_large_side_effect"
     assert approved["guard_decision"]["action"] == "warn"
 
-
-def test_tool_call_guard_advisory_is_source_labeled_on_approval_log():
-    """Stage 21: a bundle-derived advisory surfaces a flat, source-labeled
-    ``guard_advisory`` summary on the ``tool_call_approved`` lifecycle event,
-    so an advisory decision is observable and attributable without parsing the
-    nested ``guard_decision`` payload."""
-    logs = []
-
-    def warn(proposal):
-        return GuardDecision.allow(
-            check_name="bundle_manifest_guard",
-            reason="tool 'system' is declared destructive by bundle 'system' (advisory mode)",
-            action="warn",
-            severity="warning",
-            metadata={"danger": "destructive", "bundle": "system", "policy_mode": "advisory"},
-        )
-
-    executor = make_executor(
-        known_tools={"system"},
-        logger_fn=lambda event_type, **fields: logs.append((event_type, fields)),
-        tool_call_guard=ToolCallGuard([warn]),
-    )
-
-    results, intercepted, _ = executor.execute([
-        ToolCall(name="system", args={"action": "refresh"}, id="guard-core"),
-    ])
-
-    assert not intercepted
-    # Advisory never blocks: the tool still ran.
-    assert results[0]["result"]["status"] == "ok"
-    approved = logs[_log_index(logs, "tool_call_approved", trace_id="guard-core")][1]
-    summary = approved["guard_advisory"]
-    assert summary["action"] == "warn"
-    assert summary["severity"] == "warning"
-    assert summary["allowed"] is True
-    assert summary["bundle"] == "system"
-    assert summary["danger"] == "destructive"
-    assert summary["source"] == "bundle:system:destructive"
-
-
-def test_tool_call_guard_pass_through_emits_no_advisory_summary():
-    """Stage 21 non-disruption: a clean default-allow pass-through carries no
-    ``guard_advisory`` field — observability is added only for real advisories."""
-    logs = []
-    executor = make_executor(
-        known_tools={"read"},
-        logger_fn=lambda event_type, **fields: logs.append((event_type, fields)),
-    )
-
-    results, intercepted, _ = executor.execute([
-        ToolCall(name="read", args={"path": "/tmp"}, id="guard-clean"),
-    ])
-
-    assert not intercepted
-    approved = logs[_log_index(logs, "tool_call_approved", trace_id="guard-clean")][1]
-    assert approved["approval_mode"] == "pass_through"
-    assert "guard_advisory" not in approved
-    assert "guard_decision" not in approved
 
 
 def test_tool_call_guard_warning_survives_sequential_dispatch_exception():
@@ -604,6 +547,10 @@ def test_lifecycle_trace_events_cover_spilled_result(tmp_path):
     assert not intercepted
     manifest = results[0]["result"]
     assert manifest["artifact"] == "lingtai_tool_result_spill"
+    tool_block = manifest["_meta"]["tool_meta"]
+    assert "spilled" not in tool_block
+    assert isinstance(tool_block["char_count"], int) and tool_block["char_count"] > 0
+    assert tool_block["spilled_char_count"] == manifest["original_char_count"]
     spill_event = logs[_log_index(logs, "tool_result_spilled", trace_id="spill-trace")][1]
     assert spill_event["tool_call_id"] == "spill-trace"
     model_event = logs[_log_index(logs, "tool_result_model_visible", trace_id="spill-trace")][1]
@@ -726,6 +673,11 @@ def test_execute_parallel():
     elapsed = time.monotonic() - t0
     assert len(results) == 2
     assert elapsed < 0.15
+    for result in results:
+        payload = result["result"]
+        assert payload["_meta"]["tool_meta"]["elapsed_ms"] > 0
+        assert "_runtime_pending" not in payload
+        assert "elapsed_ms" not in payload
 
 
 def test_parallel_future_exception_stays_enriched_for_model(monkeypatch):
@@ -796,6 +748,37 @@ def test_intercept_hook():
     assert text == "intercepted!"
 
 
+def test_on_result_hook_receives_model_visible_spill_manifest(tmp_path):
+    seen = []
+
+    def dispatch(tc):
+        return {"status": "ok", "payload": "X" * 500}
+
+    def hook(name, args, result, *, tool_call_id=None):
+        seen.append((name, tool_call_id, result))
+        return None
+
+    executor = make_executor(
+        dispatch_fn=dispatch,
+        working_dir=tmp_path,
+        max_result_chars=120,
+    )
+
+    results, intercepted, text = executor.execute(
+        [ToolCall(name="read", args={}, id="spill-hook")],
+        on_result_hook=hook,
+    )
+
+    assert not intercepted
+    assert text == ""
+    assert len(results) == 1
+    assert seen[0][0] == "read"
+    assert seen[0][1] == "spill-hook"
+    assert seen[0][2]["status"] == "spilled"
+    assert seen[0][2]["artifact"] == "lingtai_tool_result_spill"
+    assert seen[0][2]["original_char_count"] > 120
+
+
 def test_error_collected():
     def dispatch(tc):
         raise ValueError("something broke")
@@ -862,6 +845,7 @@ def test_unknown_tool_with_known_tools():
 
 def test_guard_property():
     executor = make_executor()
+    old_guard = executor.guard
     new_guard = LoopGuard(max_total_calls=10)
     executor.guard = new_guard
     assert executor.guard is new_guard
@@ -880,8 +864,13 @@ def test_reasoning_stripped_from_args():
 
 
 def test_tool_executor_uses_meta_fn_for_stamping():
-    """ToolExecutor calls meta_fn once per tool call and merges the returned
-    dict onto the result alongside _elapsed_ms."""
+    """ToolExecutor calls meta_fn once per tool call and records the returned
+    dict under result["_runtime_pending"] together with elapsed_ms.
+
+    The real latest-only _meta.agent_meta block is promoted from _runtime_pending
+    at the tool-batch boundary by meta_block.attach_active_runtime (covered in
+    test_meta_block.py); ToolExecutor itself only records the pending snapshot.
+    """
     meta_calls = {"n": 0}
 
     def meta_fn():
@@ -907,14 +896,20 @@ def test_tool_executor_uses_meta_fn_for_stamping():
     assert not intercepted
     assert meta_calls["n"] == 1
     payload = results[0]["result"]
-    assert payload["current_time"] == "FAKE-TS"
-    assert payload["future_field"] == 1
-    assert "_elapsed_ms" in payload
+    # meta keys are recorded under _runtime_pending (not flat, not a real
+    # _meta.agent_meta block — that is attached only at the turn boundary).
+    pending = payload["_runtime_pending"]
+    assert pending["current_time"] == "FAKE-TS"
+    assert pending["future_field"] == 1
+    assert "elapsed_ms" in pending
+    assert "agent_meta" not in payload.get("_meta", {})
+    assert "current_time" not in payload
+    assert "_elapsed_ms" not in payload
 
 
 def test_tool_executor_meta_fn_covers_parallel_path():
     """meta_fn is called per-tool in the parallel execution path too,
-    and each stamped result carries its meta fields and _elapsed_ms."""
+    and each result records its meta fields under _runtime_pending."""
     meta_calls = {"n": 0}
 
     def meta_fn():
@@ -944,8 +939,13 @@ def test_tool_executor_meta_fn_covers_parallel_path():
     assert meta_calls["n"] == 2
     for r in results:
         payload = r["result"]
-        assert payload["current_time"] == "FAKE-TS"
-        assert "_elapsed_ms" in payload
+        # meta keys recorded under _runtime_pending
+        pending = payload["_runtime_pending"]
+        assert pending["current_time"] == "FAKE-TS"
+        assert "elapsed_ms" in pending
+        assert "agent_meta" not in payload.get("_meta", {})
+        assert "current_time" not in payload
+        assert "_elapsed_ms" not in payload
 
 def test_deprecated_secondary_arg_is_ignored_not_dispatched():
     seen = []
@@ -1025,8 +1025,15 @@ def test_deprecated_secondary_arg_is_ignored_on_parallel_path():
     assert any(event == "deprecated_secondary_ignored" for event, _fields in logs)
 
 
-def test_tool_executor_attaches_active_turn_tool_call_progress_metadata():
-    """ToolExecutor exposes the guard's ACTIVE-turn progress meter on results."""
+def test_tool_executor_attaches_batch_progress_notice_only():
+    """ToolExecutor attaches the batch-scoped progress *notice* to results, but
+    no longer repeats the running counter top-level.
+
+    The counter (active_turn_tool_calls) is latest-only and lives under
+    _meta.agent_meta, stamped by attach_active_runtime at the turn boundary from
+    the guard's total_calls — see test_meta_block.py. The transient notice is
+    still surfaced on the result that triggered it.
+    """
     guard = LoopGuard(max_total_calls=10_000, notice_interval=500)
     notice = guard.record_calls(500)
     assert notice is not None
@@ -1038,7 +1045,33 @@ def test_tool_executor_attaches_active_turn_tool_call_progress_metadata():
 
     assert not intercepted
     payload = results[0]["result"]
-    assert payload["active_turn_tool_calls"] == 500
+    # The running counter is NOT repeated top-level anymore.
+    assert "active_turn_tool_calls" not in payload
+    # The batch-scoped soft self-check notice is still surfaced.
     assert payload["active_turn_tool_call_notice"] == notice
     assert "active_turn_tool_call_limit" not in payload
     assert "active_turn_tool_call_notice_interval" not in payload
+
+
+def test_tool_executor_runtime_counter_stamped_at_boundary():
+    """The ACTIVE-turn counter reaches the model via _meta.agent_meta (latest-only),
+    sourced from the guard at the tool-batch boundary by attach_active_runtime."""
+    from lingtai_kernel.meta_block import attach_active_runtime
+    from lingtai_kernel.llm.interface import ToolResultBlock
+    from types import SimpleNamespace
+
+    guard = LoopGuard(max_total_calls=10_000, notice_interval=500)
+    guard.record_calls(500)
+    executor = make_executor(guard=guard)
+    agent = SimpleNamespace(_executor=executor)
+
+    # A stamped result content (carries _runtime_pending via meta_fn-less path:
+    # stamp it explicitly to mimic a time-aware agent's result).
+    from lingtai_kernel.meta_block import stamp_meta
+    content = {"status": "ok"}
+    stamp_meta(content, {"current_time": "T"}, 7)
+    block = ToolResultBlock(id="tc1", name="read", content=content)
+
+    holder = attach_active_runtime(agent, [block], prior_holder=None)
+    assert holder is content
+    assert content["_meta"]["agent_meta"]["active_turn_tool_calls"] == 500

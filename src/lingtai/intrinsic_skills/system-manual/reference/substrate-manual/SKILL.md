@@ -96,17 +96,43 @@ are cost/quality hints, not moral rankings:
 Prefer the cheapest preset that can reliably perform the task; switch back when
 experimentation is done.
 
-### `notification` and `dismiss`
+### Notifications and dismiss → the `notification` tool
 
-`system(action="notification")` queries current notification-channel mirrors. Use
-producer-specific verbs first for guarded producers, such as `email.read`,
-`email.dismiss`, Telegram `read`, or other MCP read actions. Generic dismiss is
-for channels that do not own their own read state, or for stale mirrors when you
-know the producer-owned state has already been handled.
+Reading and clearing notification channels is **not** a `system` operation. The
+`system` tool exposes no notification or dismiss verb. Use the standalone
+`notification` tool: `check` to read the live payload, and the atomic dismiss
+verbs `dismiss_channel` / `dismiss_event` / `dismiss_ref` to clear a channel or a
+single `system` event. Prefer producer-specific verbs first for guarded
+producers (`email.read`, `email.dismiss`, Telegram `read`, other MCP read
+actions); a generic channel dismiss is for channels that do not own their own
+read state, or for stale mirrors when the producer-owned state is already
+handled.
 
 Never treat a notification preview as the full source of truth when it is
 truncated, ambiguous, lacks an exact anchor, includes media/attachments, or
 contains human instructions. Read the producer channel.
+
+For channel allowlist, envelope shape, protected channels, stale-version/force
+semantics, and the undismissable large-result reminders, read
+`reference/notification-manual/SKILL.md`.
+
+### `summarize`
+
+`summarize` is the system action for tool-result context hygiene: after you have
+consumed a completed prior tool result, replace its context-visible raw payload
+with a summary that preserves the conclusion, evidence, anchors, validation,
+risks, and next steps. Runtime high-attention guidance for this behavior is carried in `_meta.guidance`.
+Treat guidance as a system-prompt-like appendix placed at the end of context: it
+is an ordered `sections[]` structure, not a loose metadata bag.  The kernel's
+`meta_readme` explanation of the `_meta` envelope is therefore one guidance
+section inside `sections[]`, alongside the packaged sections from
+`src/lingtai/prompts/guidance.json`; follow that latest guidance first when it
+appears.
+
+For the full operating procedure — urgent large-result summarization, idle
+cleanup sweeps, original-result recovery by `tool_call_id`, summary quality,
+large-result notification behavior, and the distinction between summarize and
+molt — read `reference/summarize-manual/SKILL.md`.
 
 ### Sleep, lull, interrupt, suspend, CPR, clear, nirvana
 

@@ -45,6 +45,16 @@ If the answer is no, put it in a skill/reference and leave a one-line route. Do
 not jump straight to code when a manual/reference already names the path, and do
 not bloat the resident prompt with one-off details.
 
+### Tool-result digestion
+
+Progressive disclosure applies to tool results as much as to manuals. A raw tool
+result is useful while you inspect it; after you have consumed it, the better
+active-context form is an index-style summary. Runtime `_meta.guidance` gives
+the high-attention reminder when summarization is timely. For the full procedure
+— urgent large-result handling, idle cleanup sweeps, quality checklist,
+original-result recovery, and summarize-vs-molt boundaries — read
+`reference/summarize-manual/SKILL.md`.
+
 ## 2. Action and responsiveness
 
 When need arises, act. If you can do the task safely, do it; if a tool fails, try
@@ -74,7 +84,8 @@ standing exceptions.
 Choose the smallest durable body:
 
 - Use bash for deterministic local work.
-- Use daemon for noisy, isolated, disposable exploration.
+- Use daemon for noisy, isolated, disposable exploration, batch analysis, and
+  long-context branches that would otherwise burden the parent.
 - Use avatar for persistent specialization or recurring collaboration.
 - Use MCP for durable external integrations.
 - Use knowledge for private durable facts.
@@ -88,12 +99,20 @@ that tool's manual.
 
 ### Daemon workflow methodology
 
-Protect the main agent's context. The parent agent should stay in the strategic
-seat: define the objective, negate the first plan before acting, design the
-workflow, choose the bodies, and synthesize the result. Daemons should carry the
-execution: file scans, deterministic transformations, read-only reviews, batch
-conversion, log mining, and other noisy work whose details would pollute the main
-context.
+Protect the main agent's context and use tokens deliberately. The parent agent
+should stay in the strategic seat: define the objective, negate the first plan
+before acting, design the workflow, choose the bodies, and synthesize the result.
+Daemons should carry the execution: file scans, deterministic transformations,
+read-only reviews, batch conversion, log mining, and other noisy work whose
+details would pollute the main context. Be proactive rather than waiting for an
+explicit delegation request: if the useful output is a conclusion or artifact,
+not the full transcript, isolate the work in a daemon.
+
+Daemon turns do not carry the full resident system prompt, so they are often the
+more token-efficient body for temporary exploration. Choose the daemon/model by
+exercising judgment about the task: match capability, cost, latency, privacy, and
+expected output to the work instead of blindly mirroring the parent. When the
+human gives an explicit instruction about which daemon/model to use, follow it.
 
 Use this methodology for substantial daemon work:
 
@@ -115,6 +134,16 @@ Use this methodology for substantial daemon work:
 5. **Reclaim only the grain.** Read the daemon's report/artifact, verify key
    claims, and deposit durable results in pad/knowledge/skills. Do not drag every
    daemon transcript back into the main conversation.
+
+Daemon usage is cultivated from observed practice, not mandated by a daemon-first
+rule. Watch how humans route work to daemons and subagents — which tasks they hand
+off, what they correct, and what they approve or reject — and treat that as the
+training signal for your own routing. After a meaningful daemon workflow, deposit
+the lesson into the layer that fits its lifetime: pad for active workflow state,
+lingtai/character for durable operating style, knowledge for private project facts
+and patterns, skills for reusable procedures. The parent remains responsible for
+framing, review, synthesis, and human-facing decisions; the daemon protects the
+main context by executing bounded work.
 
 Tool results may carry `_advisory.type == "duplicate_tool_call"` when the same
 semantic tool call repeats more than the free-pass threshold. This is
@@ -180,6 +209,7 @@ mechanics here. For the checklist, templates, and summary rules, go to
 | Runtime model, lifecycle, communication, memory layers, substrate expansion | `system-manual` → `reference/substrate-manual/SKILL.md` |
 | Procedures expansion, routing logic, deliverable/reporting discipline | `system-manual` → `reference/procedures-manual/SKILL.md` |
 | SQLite, log.sqlite, runtime trace inspection, `lingtai-agent log doctor/query/rebuild` | `system-manual` → `reference/sqlite-log-query/SKILL.md` |
+| Tool-result summarization, large-result reminders, original-result recovery, summarize vs molt | `system-manual` → `reference/summarize-manual/SKILL.md` |
 | Molt, pad tending, session journaling, post-wipe recovery | `psyche-manual` |
 | Spawning/managing avatars | `avatar-manual` |
 | Internal email protocol | `email-manual` |

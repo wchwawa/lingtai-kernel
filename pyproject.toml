@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lingtai"
-version = "0.12.3"
+version = "0.13.1"
 description = "Generic research agent with intrinsic tools and MCP-compatible extension interface"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,10 +62,6 @@ exclude = [
 
 [tool.setuptools.package-data]
 lingtai_kernel = ["i18n/*.json"]
-# SDK assets: committed, read-only skill-shaped asset trees reachable via
-# importlib.resources (see src/lingtai_sdk/assets/). Globbed so new asset files
-# under a skill directory are packaged without editing this list.
-lingtai_sdk = ["assets/**/*"]
 lingtai = [
     "i18n/*.json",
     "mcp_catalog.json",
@@ -75,6 +71,7 @@ lingtai = [
     "capabilities/*/manual/**/*",
     "intrinsic_skills/*/**/*",
     "prompts/*.md",
+    "prompts/*.json",
     # Rust sidecar binary bundled at build time by setup.py — present in
     # platform-specific wheels, absent in pure-Python sdist fallback
     # builds. The glob is non-strict, so missing files don't fail builds.

@@ -6,7 +6,7 @@ Covers the design's invariants and the patch's §13 test matrix:
 - §13.2 — IDLE-state pair injection / strip / no-op
 - §13.3 — ACTIVE-state deferral without ToolResultBlock mutation
 - §13.4 — ASLEEP-state wake on fingerprint change
-- §13.5 — voluntary `system(action="notification")` returns the dict
+- §13.5 — voluntary `notification(action="check")` returns the dict
 - §13.6 — producer migrations: email, soul, system
 - §13.7 — molt clearing
 
@@ -160,14 +160,17 @@ def test_concurrent_publish_atomicity(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# §13.5 — `system(action="notification")` voluntary call
+# §13.5 — `notification(action="check")` voluntary call
+#
+# The read verb moved off `system` onto the standalone `notification` tool.
+# `system(action="notification")` is no longer a valid action.
 # ---------------------------------------------------------------------------
 
 
-def test_notification_action_returns_empty_when_nothing_published(
+def test_check_action_returns_empty_when_nothing_published(
     tmp_path: Path,
 ) -> None:
-    from lingtai_kernel.intrinsics.system import handle
+    from lingtai_kernel.intrinsics.notification import handle
 
     @dataclass
     class _Stub:
@@ -177,7 +180,7 @@ def test_notification_action_returns_empty_when_nothing_published(
         def _log(self, evt: str, **fields: Any) -> None:
             self._logs.append((evt, fields))
 
-    res = handle(_Stub(), {"action": "notification"})
+    res = handle(_Stub(), {"action": "check"})
     # Voluntary call returns a placeholder dict — the live notification
     # payload (if any) is stamped on by the turn loop's meta-block hook,
     # never built by the handler itself. So even with nothing published,
@@ -189,8 +192,8 @@ def test_notification_action_returns_empty_when_nothing_published(
     assert "notification" in res["message"].lower()
 
 
-def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
-    from lingtai_kernel.intrinsics.system import handle
+def test_check_action_returns_placeholder(tmp_path: Path) -> None:
+    from lingtai_kernel.intrinsics.notification import handle
 
     publish(tmp_path, "email", {"count": 5, "newest_received_at": "2026-05-05T00:00:00Z"})
     publish(tmp_path, "soul", {"voices": [{"source": "warmth", "voice": "..."}]})
@@ -203,7 +206,7 @@ def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
         def _log(self, evt: str, **fields: Any) -> None:
             self._logs.append((evt, fields))
 
-    res = handle(_Stub(), {"action": "notification"})
+    res = handle(_Stub(), {"action": "check"})
     # Handler returns a placeholder only — channel keys MUST NOT appear
     # here. The canonical `notifications` payload is attached later by
     # `attach_active_notifications`, not by this handler. This guarantees
@@ -212,7 +215,24 @@ def test_notification_action_returns_placeholder(tmp_path: Path) -> None:
     assert "email" not in res
     assert "soul" not in res
     assert "notifications" not in res
-    assert "_notification_guidance" not in res
+    assert "_meta" not in res
+
+
+def test_system_notification_action_is_removed(tmp_path: Path) -> None:
+    """system(action="notification") is no longer a valid action."""
+    from lingtai_kernel.intrinsics.system import handle
+
+    @dataclass
+    class _Stub:
+        _working_dir: Path = tmp_path
+        _logs: list[tuple[str, dict]] = field(default_factory=list)
+
+        def _log(self, evt: str, **fields: Any) -> None:
+            self._logs.append((evt, fields))
+
+    res = handle(_Stub(), {"action": "notification"})
+    assert res["status"] == "error"
+    assert "Unknown system action" in res["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +556,7 @@ def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
 
     The synthesized ``(ToolCallBlock, ToolResultBlock)`` pair has
     already been spliced by ``_inject_notification_pair`` —
-    impersonating a voluntary ``system(action="notification")`` call
+    impersonating a voluntary ``notification(action="check")`` call
     from the agent's perspective.  ``MSG_TC_WAKE`` then unblocks the
     run loop so ``_handle_tc_wake`` drives one inference round off
     the existing wire, no fake user message and no meta prefix.
@@ -665,7 +685,7 @@ def test_sync_idle_injects_post_molt_after_molt_batch_deferred_stamp(tmp_path: P
     assert len(entries) == 2, "post-molt continuation must be injected at IDLE"
     body = entries[1].content[0].content
     assert isinstance(body, dict)
-    assert "post-molt" in body["notifications"]
+    assert "post-molt" in body["_meta"]["notifications"]
     # ...and post a wake so the run loop reorients around the continuation.
     msg = agent.inbox.get_nowait()
     assert msg.type == MSG_TC_WAKE
@@ -741,23 +761,28 @@ def test_sync_idle_injects_pair_with_synthesized_marker(tmp_path: Path) -> None:
     call_block = entries[0].content[0]
     result_block = entries[1].content[0]
     assert isinstance(call_block, ToolCallBlock)
-    assert call_block.name == "system"
-    assert call_block.args["action"] == "notification"
+    # The kernel-synthesized delivery pair impersonates a voluntary
+    # notification(action="check") read — not system(action="notification").
+    assert call_block.name == "notification"
+    assert call_block.args["action"] == "check"
     assert isinstance(result_block, ToolResultBlock)
+    assert result_block.name == "notification"
     assert result_block.synthesized is True
 
     body = result_block.content
     assert isinstance(body, dict)
     assert body["_synthesized"] is True
-    assert "not automatically human instructions" in body["_notification_guidance"]
-    assert "source(s): email" in body["_notification_guidance"]
-    assert "normal read tool" in body["_notification_guidance"]
-    assert "secondary" not in body["_notification_guidance"]
-    assert "email" in body["notifications"]
-    assert "not necessarily a human instruction" in body["notifications"]["email"]["_notification_guidance"]
-    assert "'email' notification channel" in body["notifications"]["email"]["_notification_guidance"]
-    assert "normal read action" in body["notifications"]["email"]["_notification_guidance"]
-    assert "secondary" not in body["notifications"]["email"]["_notification_guidance"]
+    # Notification payload nests under the unified _meta envelope.
+    meta = body["_meta"]
+    assert "not automatically human instructions" in meta["notification_guidance"]
+    assert "source(s): email" in meta["notification_guidance"]
+    assert "normal read tool" in meta["notification_guidance"]
+    assert "secondary" not in meta["notification_guidance"]
+    assert "email" in meta["notifications"]
+    assert "not necessarily a human instruction" in meta["notifications"]["email"]["notification_guidance"]
+    assert "'email' notification channel" in meta["notifications"]["email"]["notification_guidance"]
+    assert "normal read action" in meta["notifications"]["email"]["notification_guidance"]
+    assert "secondary" not in meta["notifications"]["email"]["notification_guidance"]
 
     assert agent._notification_block_id == call_block.id
 
@@ -823,6 +848,7 @@ def test_sync_idle_skeletonizes_then_reinjects(tmp_path: Path) -> None:
     first_body = agent._chat_stub.interface.entries[1].content[0].content
     assert first_body["_notification_placeholder"] is True
     assert "notifications" not in first_body
+    assert "_meta" not in first_body
 
 
 def test_sync_idle_empty_strips(tmp_path: Path) -> None:
@@ -879,6 +905,7 @@ def test_sync_idle_empty_strips(tmp_path: Path) -> None:
     body = agent._chat_stub.interface.entries[1].content[0].content
     assert body["_notification_placeholder"] is True
     assert "notifications" not in body
+    assert "_meta" not in body
 
 
 def test_sync_no_change_is_noop(tmp_path: Path) -> None:
@@ -1178,7 +1205,7 @@ def test_end_of_turn_idle_sync_delivers_deferred_notification(tmp_path: Path) ->
     body = result_block.content
     assert isinstance(body, dict)
     assert body["_synthesized"] is True
-    assert "system" in body["notifications"]
+    assert "system" in body["_meta"]["notifications"]
     assert isinstance(result_block.content, dict)
 
 
@@ -1367,7 +1394,7 @@ def test_sync_asleep_inject_fail_falls_back_to_degraded_request(tmp_path: Path) 
     to ASLEEP without committing the fingerprint, so the next heartbeat
     saw the same .notification/ state, woke again, failed inject again,
     reverted again — forever. The fix wakes the agent via a degraded
-    request that tells it to call system(action="notification") or
+    request that tells it to call notification(action="check") or
     read the producer files directly.
     """
     from lingtai_kernel.state import AgentState
@@ -1735,5 +1762,135 @@ def test_non_molt_batch_after_molt_can_consume_post_molt(tmp_path):
             agent, [later_result], prior_holder=agent._notification_live_holder
         )
 
-    assert "post-molt" in later_result.content["notifications"]
+    assert "post-molt" in later_result.content["_meta"]["notifications"]
     assert agent._notification_fp == notification_fingerprint(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# §13.8 — notification_block_injected durable snapshot event
+# ---------------------------------------------------------------------------
+
+
+def _make_stub_agent_for_block_log(tmp_path: Path):
+    """Build a minimal agent stub carrying _logs for notification_block_injected tests."""
+    from dataclasses import dataclass, field as dc_field
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.state import AgentState
+
+    chat = _make_chat_stub()
+
+    class _Agent(BaseAgent):
+        def __init__(self, workdir):
+            self._working_dir = workdir
+            self._state = AgentState.IDLE
+            self._notification_fp = ()
+            self._notification_block_id = None
+            self._pending_notification_meta = None
+            self._chat_stub = chat
+            self._logs: list = []
+            self.agent_name = "stub"
+            import queue
+            self.inbox = queue.Queue()
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _save_chat_history(self, *, ledger_source="main"):
+            pass
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+        def _wake_nap(self, *_a, **_kw):
+            pass
+
+        def _set_state(self, *_a, **_kw):
+            pass
+
+        def _reset_uptime(self):
+            pass
+
+    return _Agent(tmp_path)
+
+
+def test_inject_notification_pair_emits_block_injected_event(tmp_path: Path) -> None:
+    """IDLE injection via _inject_notification_pair must log notification_block_injected
+    with the full ``_meta`` envelope (tool_meta/agent_meta/guidance/notifications/
+    notification_guidance)."""
+    publish(tmp_path, "email", {"count": 2, "data": {"count": 2, "digest": "2 unread"}})
+    publish(tmp_path, "system", {"events": [{"source": "test", "body": "ping"}]})
+
+    agent = _make_stub_agent_for_block_log(tmp_path)
+    agent._sync_notifications()
+
+    # notification_pair_injected must still fire (existing behavior unchanged).
+    pair_logs = [f for evt, f in agent._logs if evt == "notification_pair_injected"]
+    assert pair_logs, "notification_pair_injected must still be logged"
+
+    # notification_block_injected must be emitted.
+    block_logs = [f for evt, f in agent._logs if evt == "notification_block_injected"]
+    assert block_logs, "notification_block_injected event must be logged"
+    bl = block_logs[-1]
+
+    assert bl["mode"] == "synthetic_notification_pair"
+    assert "call_id" in bl
+    assert isinstance(bl["sources"], list)
+    assert "email" in bl["sources"]
+    assert "system" in bl["sources"]
+
+    # New schema: a single top-level ``_meta`` envelope carrying formal blocks.
+    meta = bl["_meta"]
+    assert "tool_meta" in meta
+    assert meta["tool_meta"].get("synthetic") is True
+    assert "agent_meta" in meta
+    assert "guidance" in meta
+    assert "meta_readme" not in meta["guidance"]
+    assert any(section.get("id") == "meta_readme" for section in meta["guidance"]["sections"])
+
+    assert "notification_guidance" in meta
+    assert "not automatically human instructions" in meta["notification_guidance"]
+    assert "notifications" in meta
+    notifs = meta["notifications"]
+    assert "email" in notifs
+    assert "system" in notifs
+    # Per-channel guidance present
+    assert "notification_guidance" in notifs["email"]
+
+
+def test_block_injected_payload_not_mutated_by_skeletonization(tmp_path: Path) -> None:
+    """The logged payload must survive later skeletonization of the live holder."""
+    import time as _time
+
+    publish(tmp_path, "email", {"count": 1})
+    agent = _make_stub_agent_for_block_log(tmp_path)
+    agent._sync_notifications()
+
+    block_logs = [f for evt, f in agent._logs if evt == "notification_block_injected"]
+    assert block_logs
+    logged_notifs = block_logs[-1]["_meta"]["notifications"]
+    assert "email" in logged_notifs
+
+    # Simulate later delivery: publish new state and re-sync; this skeletonizes
+    # the first live holder.
+    _time.sleep(0.001)
+    publish(tmp_path, "email", {"count": 2, "extra": "more"})
+    agent._sync_notifications()
+
+    # The *first* logged snapshot must still have email in it (not mutated).
+    assert "email" in logged_notifs
+
+
+def test_block_injected_emits_companion_to_pair_injected(tmp_path: Path) -> None:
+    """Both notification_pair_injected and notification_block_injected must fire
+    on every IDLE injection, in that order (pair before block)."""
+    publish(tmp_path, "email", {"count": 1})
+    agent = _make_stub_agent_for_block_log(tmp_path)
+    agent._sync_notifications()
+
+    event_types = [evt for evt, _ in agent._logs]
+    pair_idx = next((i for i, e in enumerate(event_types) if e == "notification_pair_injected"), -1)
+    block_idx = next((i for i, e in enumerate(event_types) if e == "notification_block_injected"), -1)
+    assert pair_idx != -1, "notification_pair_injected missing"
+    assert block_idx != -1, "notification_block_injected missing"
+    assert block_idx > pair_idx, "notification_block_injected must follow notification_pair_injected"

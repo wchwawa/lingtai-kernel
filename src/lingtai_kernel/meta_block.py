@@ -7,25 +7,382 @@ tool-result stamp (in ToolExecutor) — read from here.
 Curate carefully: every field added to `build_meta` ships on every text input
 and every tool result.
 
+All four tool-result metadata blocks live under a single ``_meta`` envelope on
+the result dict:
+
+- ``_meta.tool_meta`` — permanent per-result identity facts, written once by
+  ``ToolExecutor._attach_tool_block`` and never moved.
+- ``_meta.agent_meta`` — latest-result-only agent/current-state snapshot.
+- ``_meta.guidance`` — latest-result-only kernel guidance.  Guidance is an
+  ordered, system-prompt-like appendix; ``meta_readme`` is one section within
+  ``guidance.sections`` rather than a sibling key.
+- ``_meta.notifications`` / ``_meta.notification_guidance`` — latest-result-only
+  channel-owned notification payloads plus kernel safety framing.
+
 Channel encoding:
-- Tool-result channel: `stamp_meta` flattens the dict into the result dict
-  as-is. The LLM sees structured JSON (e.g. ``result["context"]["usage"]``).
+- Tool-result channel: ``stamp_meta`` records a per-tool runtime snapshot,
+  which ``attach_active_runtime`` promotes into ``_meta.agent_meta`` plus
+  ``_meta.guidance`` on the *latest* result dict only (latest-only; the prior
+  holder's blocks are stripped).
 - Text-input channel: `render_meta` formats the same dict into a prose
   prefix line. Inbox content is NOT rendered here — it lives in the
   user-turn body, drained by ``_concat_queued_messages`` upstream.
 
 As of 2026-05-02, the meta block no longer carries inbox-drained
 notifications. System-source notifications (mail arrival, bounce, future
-MCP events) are now delivered as synthetic system(action="notification")
-tool-call pairs spliced via tc_inbox; see
+MCP events) are now delivered as synthetic notification(action="check")
+tool-call pairs spliced by ``BaseAgent._inject_notification_pair`` (the
+legacy ``tc_inbox`` splice path is dormant); see
 docs/plans/2026-05-02-system-notification-as-tool-call.md.
 """
 from __future__ import annotations
 
+import json as _json
 import time as _time
+from importlib import resources as _resources
 
 from .i18n import t as _t
 from .time_veil import now_iso
+
+# ---------------------------------------------------------------------------
+# The single ``_meta`` envelope key and its four nested blocks.  Every dict
+# tool result carries ``result["_meta"]``; the blocks beneath it are:
+#   * ``tool_meta``            — permanent, per-result (every tool result)
+#   * ``agent_meta``           — latest-result-only agent/current state
+#   * ``guidance``             — latest-result-only kernel guidance
+#   * ``notifications`` +
+#     ``notification_guidance``— latest-result-only channel payloads
+# ---------------------------------------------------------------------------
+META_ENVELOPE_KEY = "_meta"
+TOOL_META_KEY = "tool_meta"
+AGENT_META_KEY = "agent_meta"
+GUIDANCE_KEY = "guidance"
+NOTIFICATIONS_KEY = "notifications"
+NOTIFICATION_GUIDANCE_KEY = "notification_guidance"
+
+# Keys that are kernel/runtime scaffolding, not the formal tool-result payload.
+# Summarize and large-result reminder sizing must ignore these so notification
+# or guidance text is not treated as result content to be summarized.
+FORMAL_TOOL_RESULT_EXCLUDED_KEYS = frozenset({
+    META_ENVELOPE_KEY,
+    "_runtime_pending",
+    "_advisory",
+    "active_turn_tool_calls",
+    "active_turn_tool_call_notice",
+})
+
+
+def formal_tool_result_content(content):
+    """Return the formal tool-result payload, excluding kernel metadata.
+
+    The ``_meta`` envelope can contain notifications and guidance that are
+    channel/runtime state, not the payload returned by the tool.  Context
+    summarization and large-result reminder sizing operate on this formal body
+    only, so notification contents are neither threshold-counted nor
+    summarized as if they were the result.
+    """
+    if not isinstance(content, dict):
+        return content
+    return {
+        key: value
+        for key, value in content.items()
+        if key not in FORMAL_TOOL_RESULT_EXCLUDED_KEYS
+    }
+
+
+def _visible_content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return _json.dumps(content, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def formal_tool_result_visible_len(content) -> int:
+    """Visible character length of the formal tool-result payload only."""
+    return len(_visible_content_text(formal_tool_result_content(content)))
+
+
+def formal_tool_result_preview(content, limit: int = 200) -> str:
+    """Preview string for the formal tool-result payload only."""
+    if limit <= 0:
+        return ""
+    return _visible_content_text(formal_tool_result_content(content))[:limit]
+
+
+def _is_tool_result_block(block) -> bool:
+    """Best-effort duck-typing for ToolResultBlock without a hard import cycle."""
+    return block.__class__.__name__ == "ToolResultBlock" and hasattr(block, "content")
+
+
+def _iter_history_tool_result_blocks(agent):
+    session = getattr(agent, "_session", None)
+    chat = getattr(session, "chat", None)
+    interface = getattr(chat, "interface", None)
+    entries = getattr(interface, "_entries", None)
+    if not entries:
+        return
+    for entry in entries:
+        for block in getattr(entry, "content", ()) or ():
+            if _is_tool_result_block(block):
+                yield block
+
+
+TOOL_RESULT_CHARS_TOP_N = 5
+TOOL_RESULT_CHARS_MIN = 1000
+TOOL_RESULT_CHARS_README = (
+    "listing top 5 tool result longer than 1000 char; "
+    "consider summarize if deemed useless"
+)
+
+
+def _tool_result_id(block) -> str:
+    return str(getattr(block, "id", None) or getattr(block, "tool_call_id", None) or "")
+
+
+def current_tool_result_chars(agent, extra_results=()) -> dict:
+    """Return current context-visible formal tool-result char summary.
+
+    The count is intentionally based on formal result payloads rather than
+    runtime metadata.  ``_meta`` notifications/guidance, transient scaffolding,
+    and other non-payload fields are excluded by
+    ``formal_tool_result_visible_len``.  ``extra_results`` lets latest-result
+    stamping include the just-created tool-result batch before those blocks are
+    appended to chat history.
+    """
+    total = 0
+    top: list[dict] = []
+    seen: set[int] = set()
+
+    def visit(block) -> None:
+        nonlocal total
+        seen.add(id(block))
+        chars = formal_tool_result_visible_len(getattr(block, "content", ""))
+        total += chars
+        if chars > TOOL_RESULT_CHARS_MIN:
+            top.append({"id": _tool_result_id(block), "chars": chars})
+
+    for block in _iter_history_tool_result_blocks(agent) or ():
+        visit(block)
+    for block in extra_results or ():
+        if not _is_tool_result_block(block) or id(block) in seen:
+            continue
+        visit(block)
+
+    top.sort(key=lambda item: item["chars"], reverse=True)
+    return {
+        "_readme": TOOL_RESULT_CHARS_README,
+        "total_chars": total,
+        "top_results": top[:TOOL_RESULT_CHARS_TOP_N],
+    }
+
+
+def _meta_block(result: dict) -> dict:
+    """Return ``result["_meta"]``, creating an empty dict if absent.
+
+    Centralizes the envelope so the per-result ``tool_meta`` writer and the
+    latest-only ``agent_meta``/``guidance``/notification movers all share one
+    container.
+    """
+    meta = result.get(META_ENVELOPE_KEY)
+    if not isinstance(meta, dict):
+        meta = {}
+        result[META_ENVELOPE_KEY] = meta
+    return meta
+
+
+def build_meta_readme() -> dict:
+    """Self-describing readme for the four ``_meta`` blocks.
+
+    Latest-only: this rides inside ``_meta.guidance`` on the freshest tool
+    result, never repeated in every ``tool_meta`` (that would be expensive).
+    Each entry states what the block is for and whether it is per-result or
+    latest-only — no policy, just structural orientation.
+    """
+    return {
+        TOOL_META_KEY: (
+            "Per-result tool/call metadata (id, timestamp, char_count, "
+            "elapsed_ms). Present on every tool result; permanent."
+        ),
+        AGENT_META_KEY: (
+            "Agent/current-state snapshot (time, context usage, stamina, "
+            "active_turn_tool_calls, current_tool_result_chars). Latest tool "
+            "result only; older copies are stripped as newer results arrive. "
+            "current_tool_result_chars is a dict with total_chars and the top "
+            "long tool results to consider for summarization."
+        ),
+        GUIDANCE_KEY: (
+            "Kernel guidance sections, including the meta_readme section. "
+            "Latest tool result only."
+        ),
+        NOTIFICATION_GUIDANCE_KEY: (
+            "Kernel safety framing for channel notification handling. Latest "
+            "tool result only."
+        ),
+        NOTIFICATIONS_KEY: (
+            "Channel notification payloads with kernel safety framing under "
+            "notification_guidance. Latest tool result only; channel-owned. "
+            "Not part of the formal tool-result payload; do not summarize "
+            "notification contents as the result body."
+        ),
+    }
+
+
+def now_iso_plain() -> str:
+    """Return the current UTC time as a plain ISO-8601 string (no agent needed).
+
+    Used by ``_meta.tool_meta`` block stamping where no agent context is available.
+    Always returns UTC with a Z suffix, e.g. ``2026-06-20T12:34:56Z``.
+    Falls back to empty string on any error.
+    """
+    try:
+        import datetime as _dt
+        return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# guidance.json — prompt package resource, loaded once.
+# ---------------------------------------------------------------------------
+
+_GUIDANCE_CACHE: dict | None = None
+
+# Allowed values for the small fixed-vocabulary fields. Kept permissive on
+# purpose: the kernel must not reject a future render strategy it does not yet
+# know about, only structurally malformed payloads.
+_GUIDANCE_REQUIRED_TOP_KEYS = ("schema_version", "guidance_version", "priority", "render_mode", "sections")
+
+
+class GuidanceSchemaError(ValueError):
+    """Raised when guidance.json does not match the expected shape.
+
+    A structural problem in the *packaged* resource is a build/authoring error,
+    not a runtime condition, so this is surfaced loudly to ``validate_runtime_guidance``
+    callers (and the test suite). The live loader (``build_runtime_guidance``)
+    degrades to ``{}`` rather than crashing an agent on a bad ship.
+    """
+
+
+
+META_README_SECTION_ID = "meta_readme"
+
+
+def build_meta_readme_section() -> Dict[str, str]:
+    """Return the guidance section that explains the `_meta` envelope.
+
+    Guidance is consumed like a system prompt appended at the end of context, so
+    every guidance explanation must be an ordered section.  In particular,
+    `meta_readme` must not be reintroduced as a sibling of `sections`.
+    """
+    readme = build_meta_readme()
+    body_lines = [
+        "This section explains the `_meta` envelope carried on tool results.",
+        "`_meta.guidance` is an ordered, system-prompt-like appendix rendered at the end of context; `meta_readme` therefore lives here as a section, not as a sibling key beside `sections`.",
+        "",
+    ]
+    body_lines.extend(f"- `{key}`: {value}" for key, value in readme.items())
+    return {
+        "id": META_README_SECTION_ID,
+        "title": "_meta envelope readme",
+        "body": "\n".join(body_lines),
+    }
+
+
+def build_guidance_with_meta_readme(base_guidance: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Return runtime guidance with the `_meta` readme appended as a section."""
+    source = build_runtime_guidance() if base_guidance is None else base_guidance
+    guidance = dict(source or {})
+    # Preserve packaged guidance keys when available, but keep the fallback shape
+    # valid too: even if guidance.json cannot be loaded, guidance remains the
+    # same system-prompt-like structure with a single meta_readme section.
+    guidance.setdefault("schema_version", 1)
+    guidance.setdefault("guidance_version", "runtime-meta-readme")
+    guidance.setdefault("priority", "high")
+    guidance.setdefault("render_mode", "latest_tool_result_only")
+    sections = []
+    for section in guidance.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        if section.get("id") == META_README_SECTION_ID:
+            continue
+        sections.append(dict(section))
+    sections.append(build_meta_readme_section())
+    guidance["sections"] = sections
+    return guidance
+
+def validate_runtime_guidance(data) -> dict:
+    """Validate the guidance payload shape, returning it unchanged on success.
+
+    Raises :class:`GuidanceSchemaError` on any structural violation:
+      * top-level must be a dict with ``schema_version`` (int), ``guidance_version``
+        (str), ``priority`` (str), ``render_mode`` (str), and ``sections`` (list);
+      * each section must be a dict with non-empty string ``id``, ``title``, ``body``;
+      * section ``id`` and ``title`` must each be unique across the list.
+
+    This is intentionally strict and independently testable so a malformed
+    packaged resource is caught by the test suite rather than silently shipping
+    empty guidance to production agents.
+    """
+    if not isinstance(data, dict):
+        raise GuidanceSchemaError(f"guidance must be a JSON object, got {type(data).__name__}")
+    for key in _GUIDANCE_REQUIRED_TOP_KEYS:
+        if key not in data:
+            raise GuidanceSchemaError(f"guidance missing required key: {key!r}")
+    if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool):
+        raise GuidanceSchemaError("guidance.schema_version must be an int")
+    for str_key in ("guidance_version", "priority", "render_mode"):
+        if not isinstance(data[str_key], str) or not data[str_key]:
+            raise GuidanceSchemaError(f"guidance.{str_key} must be a non-empty string")
+    sections = data["sections"]
+    if not isinstance(sections, list) or not sections:
+        raise GuidanceSchemaError("guidance.sections must be a non-empty list")
+
+    seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
+    for idx, section in enumerate(sections):
+        if not isinstance(section, dict):
+            raise GuidanceSchemaError(f"guidance.sections[{idx}] must be an object")
+        for field in ("id", "title", "body"):
+            value = section.get(field)
+            if not isinstance(value, str) or not value:
+                raise GuidanceSchemaError(
+                    f"guidance.sections[{idx}].{field} must be a non-empty string"
+                )
+        sid = section["id"]
+        stitle = section["title"]
+        if sid in seen_ids:
+            raise GuidanceSchemaError(f"duplicate guidance section id: {sid!r}")
+        if stitle in seen_titles:
+            raise GuidanceSchemaError(f"duplicate guidance section title: {stitle!r}")
+        seen_ids.add(sid)
+        seen_titles.add(stitle)
+    return data
+
+
+def build_runtime_guidance() -> dict:
+    """Load, validate, and return the runtime guidance payload from prompts/guidance.json.
+
+    Cached after first successful load.  The payload is schema-checked via
+    :func:`validate_runtime_guidance`; on a missing/unreadable resource, a JSON
+    parse error, or a schema violation the loader returns an empty dict so a
+    live agent degrades (no guidance) rather than crashing.  Tests should call
+    :func:`validate_runtime_guidance` directly to assert the *packaged* resource
+    is well-formed — that path raises, this one does not.
+    """
+    global _GUIDANCE_CACHE
+    if _GUIDANCE_CACHE is not None:
+        return _GUIDANCE_CACHE
+    try:
+        pkg = _resources.files("lingtai")
+        data = (pkg / "prompts" / "guidance.json").read_text(encoding="utf-8")
+        parsed = _json.loads(data)
+        validate_runtime_guidance(parsed)
+        _GUIDANCE_CACHE = parsed
+        return parsed
+    except Exception:
+        return {}
 
 
 def build_meta(agent) -> dict:
@@ -44,6 +401,7 @@ def build_meta(agent) -> dict:
                 "usage": float,              # fraction of context window used
             },
             "stamina_left_seconds": float,   # session time remaining; -1 if unstarted
+            "current_tool_result_chars": dict, # total + top long formal tool results
         }
 
     Sentinel handling: when token decomposition has not yet run, the
@@ -145,6 +503,8 @@ def build_meta(agent) -> dict:
     else:
         meta["stamina_left_seconds"] = -1
 
+    meta["current_tool_result_chars"] = current_tool_result_chars(agent)
+
     # Notifications are deliberately NOT included here. Active-state
     # notification payload is a moving single-slot block that lives on the
     # latest tool-call result only — see ``attach_active_notifications``.
@@ -166,14 +526,19 @@ def build_notification_payload(notifications: dict) -> dict:
 
     The same payload shape is used in both delivery surfaces:
 
-    * IDLE/ASLEEP synthesized ``system(action="notification")`` pairs; and
+    * IDLE/ASLEEP synthesized ``notification(action="check")`` pairs; and
     * ACTIVE ordinary dict-shaped tool results.
 
     Producers own the per-channel envelope under ``notifications``.  The kernel
-    adds only safety/provenance framing: one top-level guidance string and one
-    source-specific guidance string per channel.  There is deliberately no
-    separate compact/preview representation here; consumers should inspect the
-    producer payload directly (for example ``email.data.digest``).
+    adds only safety/provenance framing: one top-level ``notification_guidance``
+    string and one source-specific ``notification_guidance`` string per channel.
+    There is deliberately no separate compact/preview representation here;
+    consumers should inspect the producer payload directly (for example
+    ``email.data.digest``).
+
+    The returned dict carries the bare ``notifications`` +
+    ``notification_guidance`` keys; callers nest it under the result's ``_meta``
+    envelope (see :func:`attach_active_notifications`).
     """
     source_names = ", ".join(str(source) for source in notifications.keys()) or "unknown"
     notification_guidance = (
@@ -187,7 +552,7 @@ def build_notification_payload(notifications: dict) -> dict:
         "If a human is waiting and the next step may take time, acknowledge "
         "with the communication tool directly before the long-running tool."
         " After handling, dismiss the notification and end your turn"
-        " — do not call system(action='notification') voluntarily."
+        " — do not call notification(action='check') voluntarily."
     )
 
     notifications_with_guidance: dict = {}
@@ -207,13 +572,79 @@ def build_notification_payload(notifications: dict) -> dict:
             payload_for_wire = dict(payload)
         else:
             payload_for_wire = {"data": payload}
-        payload_for_wire["_notification_guidance"] = source_guidance
+        payload_for_wire[NOTIFICATION_GUIDANCE_KEY] = source_guidance
         notifications_with_guidance[source] = payload_for_wire
 
     return {
-        "_notification_guidance": notification_guidance,
-        "notifications": notifications_with_guidance,
+        NOTIFICATION_GUIDANCE_KEY: notification_guidance,
+        NOTIFICATIONS_KEY: notifications_with_guidance,
     }
+
+
+def build_synthetic_tool_meta(
+    call_id: str,
+    *,
+    char_count: int = 0,
+    elapsed_ms: int = 0,
+) -> dict:
+    """Return a minimal synthetic ``tool_meta`` block for the IDLE/ASLEEP pair.
+
+    The synthesized ``notification(action="check")`` pair has no real tool
+    execution, so :class:`ToolExecutor._attach_tool_block` never stamps a
+    ``_meta.tool_meta`` block on it.  The ``/notification`` history view still
+    wants a ``tool_meta`` block to render, so this builds a parallel one carrying
+    the same identity fields a real ``tool_meta`` has (id/timestamp/char_count/
+    elapsed_ms) plus a ``synthetic: True`` marker that distinguishes it from a
+    real tool result's permanent block.
+    """
+    return {
+        "id": call_id or "<unknown>",
+        "timestamp": now_iso_plain(),
+        "char_count": int(char_count),
+        "elapsed_ms": int(elapsed_ms),
+        "synthetic": True,
+    }
+
+
+def build_synthetic_meta_envelope(
+    agent,
+    notification_payload: dict,
+    *,
+    call_id: str,
+) -> dict:
+    """Assemble the full ``_meta`` envelope for a synthesized notification pair.
+
+    Produces the same ``_meta`` envelope an ACTIVE tool result persists:
+
+      * ``tool_meta``            — synthetic identity (see
+        :func:`build_synthetic_tool_meta`)
+      * ``agent_meta``           — current ``build_meta`` snapshot
+      * ``guidance``             — packaged ``guidance.json`` plus a
+        ``meta_readme`` section in ``guidance.sections``
+      * ``notifications`` +
+        ``notification_guidance``— from ``notification_payload`` (the dict
+        returned by :func:`build_notification_payload`)
+
+    Used only for the durable ``notification_block_injected`` snapshot so the TUI
+    ``/notification`` view shows the same ``_meta.*`` blocks for synthesized
+    pairs as for ACTIVE tool results.  The live wire body keeps its own
+    (notification-only) ``_meta`` — this is a logging-side reconstruction.
+    """
+    try:
+        agent_meta = build_meta(agent)
+    except (AttributeError, TypeError):
+        agent_meta = {}
+
+    guidance = build_guidance_with_meta_readme()
+
+    envelope: dict = {
+        TOOL_META_KEY: build_synthetic_tool_meta(call_id),
+        AGENT_META_KEY: agent_meta,
+        GUIDANCE_KEY: guidance,
+    }
+    # notifications + notification_guidance from the canonical payload.
+    envelope.update(notification_payload)
+    return envelope
 
 
 def _collect_active_notifications_payload(agent) -> dict | None:
@@ -266,7 +697,7 @@ _NOTIFICATION_SKELETON: dict = {
     "_synthesized": True,
     "_notification_placeholder": True,
     "message": (
-        "This was a kernel-synthesized system(action=notification) tool-call pair. "
+        "This was a kernel-synthesized notification(action=check) tool-call pair. "
         "The live notification payload that was here has been moved to a newer tool "
         "result metadata block or cleared."
     ),
@@ -279,8 +710,8 @@ def skeletonize_notification_holder(agent) -> None:
 
     The live holder (``agent._notification_live_holder``) may point to:
     * A normal tool-result content dict — strip the canonical notification
-      payload keys (``notifications`` and ``_notification_guidance``), plus the
-      retired ``_notifications`` key for upgrade cleanup.
+      payload keys (``notifications`` and ``notification_guidance``) from the
+      ``_meta`` envelope, leaving the other ``_meta`` blocks intact.
     * A synthesized pair's content dict — replace ALL keys with the skeleton
       so the pair stays in history but carries no live payload.
 
@@ -301,10 +732,14 @@ def skeletonize_notification_holder(agent) -> None:
             holder.clear()
             holder.update(_NOTIFICATION_SKELETON)
         else:
-            # Normal tool result dict — strip notification keys only.
-            holder.pop("_notifications", None)  # retired compact shape
-            holder.pop("notifications", None)
-            holder.pop("_notification_guidance", None)
+            # Normal tool result dict — strip notification keys from _meta,
+            # preserving the other _meta blocks (tool_meta/agent_meta/guidance).
+            meta = holder.get(META_ENVELOPE_KEY)
+            if isinstance(meta, dict):
+                meta.pop(NOTIFICATIONS_KEY, None)
+                meta.pop(NOTIFICATION_GUIDANCE_KEY, None)
+                if not meta:
+                    holder.pop(META_ENVELOPE_KEY, None)
     agent._notification_live_holder = None
 
 
@@ -335,8 +770,9 @@ def attach_active_notifications(
           ``agent._notification_live_holder`` before the new holder is
           registered.
         * If active notifications exist, stamp the same ``notifications`` +
-          ``_notification_guidance`` payload shape used by the synthesized
-          notification pair onto the latest dict-shaped tool result, commit the
+          ``notification_guidance`` payload shape used by the synthesized
+          notification pair under ``_meta`` on the latest dict-shaped tool
+          result, commit the
           current filesystem fingerprint onto ``agent._notification_fp`` so the
           IDLE-path synthesized pair will not later re-deliver the same
           unchanged state, and return that dict as the new holder.
@@ -386,7 +822,9 @@ def attach_active_notifications(
         agent._notification_live_holder = prior_holder
         skeletonize_notification_holder(agent)
 
-    target.update(payload)
+    # Nest the canonical notification payload under the result's _meta
+    # envelope (alongside any tool_meta/agent_meta/guidance blocks).
+    _meta_block(target).update(payload)
     # Register this dict as the new live holder.
     agent._notification_live_holder = target
 
@@ -459,25 +897,140 @@ def _render_context_fragment(agent, meta: dict) -> str:
 
 
 def stamp_meta(result: dict, meta: dict, elapsed_ms: int) -> dict:
-    """Merge meta fields into a tool-result dict (in place) and return it.
+    """Record per-tool runtime ``meta`` on the result for the boundary holder.
 
-    When ``meta`` is empty, neither the meta fields nor ``_elapsed_ms`` are
-    written — matching the pre-existing behaviour of
-    ``stamp_tool_result(time_awareness=False)`` exactly. This is deliberate:
-    the spec originally claimed ``_elapsed_ms`` always writes, but preserving
-    the old time-blind path means a time-blind agent's tool results stay
-    free of any timing signal, not just wall-clock. Callers that want a
-    timing-only stamp should pass a non-empty meta dict.
+    ``_meta.agent_meta`` / ``_meta.guidance`` are **latest-only** blocks: only
+    the freshest provider-visible tool result carries them.  Stamping them on
+    every result (the old behaviour) would leave stale snapshots in history, so
+    this function records the per-tool ``meta`` snapshot and measured
+    ``elapsed_ms`` under a transient ``_runtime_pending`` key, which
+    :func:`attach_active_runtime` consumes at the tool-batch boundary
+    (analogous to the notification holder) and then deletes.
 
-    ``_elapsed_ms`` lives here (rather than inside ``build_meta``) because
-    it is a per-tool-call measurement — not per-turn agent state — and it
-    would be wrong for the same value to appear on the text-input prefix.
-    It is written unconditionally after the meta-key loop, so it always
-    overrides any identically-named key in ``meta``.
+    When ``meta`` is empty nothing is recorded — matching the pre-existing
+    time-blind behaviour where no timing signal appears.
+
+    ``_runtime_pending`` is internal scaffolding and never reaches the wire: the
+    boundary holder strips it from every result it inspects.  The
+    ``_meta.tool_meta`` block written by ``ToolExecutor._attach_tool_block`` is
+    separate and permanent; ``stamp_meta`` does not touch it.
     """
     if not meta:
         return result
-    for k, v in meta.items():
-        result[k] = v
-    result["_elapsed_ms"] = elapsed_ms
+    pending: dict = dict(meta)
+    pending["elapsed_ms"] = elapsed_ms
+    result["_runtime_pending"] = pending
     return result
+
+
+# ---------------------------------------------------------------------------
+# agent_meta / guidance blocks — latest-result-only moving holder under _meta,
+# mirrors the notification payload pattern in ``attach_active_notifications``.
+# ---------------------------------------------------------------------------
+
+
+def _strip_runtime_pending(tool_results: list) -> None:
+    """Remove the transient ``_runtime_pending`` scaffolding from every result.
+
+    ``stamp_meta`` records a per-tool ``_runtime_pending`` snapshot on each
+    dict result; only the latest result's snapshot is promoted into the real
+    ``_meta.agent_meta`` / ``_meta.guidance`` blocks.  This clears the
+    scaffolding from the rest so it never reaches the wire or lingers in
+    history.
+    """
+    for block in tool_results:
+        content = getattr(block, "content", None)
+        if isinstance(content, dict):
+            content.pop("_runtime_pending", None)
+
+
+def _strip_agent_meta_and_guidance(holder: dict) -> None:
+    """Strip the latest-only ``agent_meta``/``guidance`` blocks from a holder.
+
+    Notification keys and the permanent ``tool_meta`` are left intact; the
+    ``_meta`` envelope is dropped entirely only if it becomes empty.
+    """
+    meta = holder.get(META_ENVELOPE_KEY)
+    if isinstance(meta, dict):
+        meta.pop(AGENT_META_KEY, None)
+        meta.pop(GUIDANCE_KEY, None)
+        if not meta:
+            holder.pop(META_ENVELOPE_KEY, None)
+
+
+def attach_active_runtime(
+    agent,
+    tool_results: list,
+    *,
+    prior_holder: dict | None = None,
+) -> dict | None:
+    """Move the live ``agent_meta``/``guidance`` blocks to the latest result only.
+
+    Mirrors :func:`attach_active_notifications`:
+
+      * Strip ``_meta.agent_meta`` / ``_meta.guidance`` from ``prior_holder``
+        (the previous live holder) so stale snapshots do not accumulate in
+        history.  The prior holder keeps its permanent ``_meta.tool_meta`` and
+        any notification keys.
+      * Promote the latest dict-shaped result's per-tool ``_runtime_pending``
+        snapshot (recorded by :func:`stamp_meta`) into ``_meta.agent_meta``
+        (kernel runtime state + ``elapsed_ms`` + ``active_turn_tool_calls``)
+        and ``_meta.guidance`` (from ``guidance.json`` plus the latest-only
+        ``meta_readme`` section).
+      * Strip the transient ``_runtime_pending`` scaffolding from *all* results.
+      * Return the new holder dict (or ``None`` when no live runtime applies).
+
+    ``active_turn_tool_calls`` is read from the agent's executor guard so the
+    counter lives under ``_meta.agent_meta`` (latest-only) rather than being
+    repeated on every result.  ``elapsed_ms`` comes from the latest result's
+    own ``_runtime_pending`` snapshot.
+
+    No live runtime is produced (and the prior holder is still cleared) when the
+    batch has no dict-shaped target or the latest target carried no pending
+    snapshot (e.g. a time-blind agent whose ``meta`` is empty).
+    """
+    # The prior holder always loses its latest-only blocks — at most one live
+    # holder carries agent_meta/guidance.
+    if prior_holder is not None:
+        _strip_agent_meta_and_guidance(prior_holder)
+
+    target = _last_dict_result(tool_results)
+    pending = target.pop("_runtime_pending", None) if target is not None else None
+
+    # Clear scaffolding from every other result regardless of outcome.
+    _strip_runtime_pending(tool_results)
+
+    if target is None or not isinstance(pending, dict) or not pending:
+        return None
+
+    agent_meta: dict = dict(pending)
+    calls = _active_turn_tool_calls(agent)
+    if calls is not None:
+        agent_meta["active_turn_tool_calls"] = calls
+    agent_meta["current_tool_result_chars"] = current_tool_result_chars(
+        agent, extra_results=tool_results
+    )
+
+    # Guidance is prompt-like ordered material.  Keep the `_meta` readme as a
+    # section so consumers can render one coherent guidance block instead of a
+    # mixed object with sibling control fields.
+    guidance = build_guidance_with_meta_readme()
+
+    meta = _meta_block(target)
+    meta[AGENT_META_KEY] = agent_meta
+    meta[GUIDANCE_KEY] = guidance
+    return target
+
+
+def _active_turn_tool_calls(agent) -> int | None:
+    """Best-effort read of the ACTIVE-turn tool-call counter from the guard.
+
+    Returns ``None`` (counter omitted) if the agent has no executor/guard or
+    the attribute is unavailable, so a missing counter never breaks stamping.
+    """
+    try:
+        guard = getattr(getattr(agent, "_executor", None), "guard", None)
+        total = getattr(guard, "total_calls", None)
+        return int(total) if total is not None else None
+    except Exception:
+        return None

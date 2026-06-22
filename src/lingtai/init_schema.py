@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 
+from lingtai_kernel.config import THINKING_LEVELS
+
 log = logging.getLogger(__name__)
 
 # Schema tables lifted to module scope so tests can assert internal consistency
@@ -70,6 +72,13 @@ MANIFEST_OPTIONAL: dict[str, type | tuple[type, ...]] = {
     "timezone_awareness": bool,
     "pseudo_agent_subscriptions": list,
     "preset": dict,
+    # Large-result notification threshold.  When a tool result's serialized
+    # length exceeds this value it becomes a pending large-result case; the
+    # system-channel notification fires only once the combined length of all
+    # pending large-result cases exceeds 50000 chars (the total-length gate).
+    # Default: 3000.  0 disables notifications.  Runtime mutation via the system
+    # tool is not supported — change this field and refresh.
+    "summarize_notification_threshold": int,
 }
 
 MANIFEST_KNOWN: set[str] = set(MANIFEST_REQUIRED) | set(MANIFEST_OPTIONAL)
@@ -217,6 +226,17 @@ def validate_init(data: dict) -> list[str]:
         if key not in MANIFEST_KNOWN:
             warnings.append(f"unknown field: manifest.{key}")
 
+    if "summarize_notification_threshold" in manifest:
+        summarize_threshold = manifest["summarize_notification_threshold"]
+        if isinstance(summarize_threshold, bool):
+            raise ValueError(
+                "manifest.summarize_notification_threshold: expected non-negative int, got bool"
+            )
+        if summarize_threshold < 0:
+            raise ValueError(
+                "manifest.summarize_notification_threshold: expected non-negative int"
+            )
+
     soul = manifest.get("soul")
     if soul is not None:
         _optional_keys(soul, {
@@ -244,6 +264,18 @@ def validate_init(data: dict) -> list[str]:
         if isinstance(compact_threshold, int) and compact_threshold <= 0:
             raise ValueError(
                 "manifest.llm.compact_threshold: expected positive int or null"
+            )
+    if "thinking" in llm:
+        if llm["provider"].lower() != "codex":
+            raise ValueError(
+                "manifest.llm.thinking is currently supported only for "
+                "the Codex provider (provider='codex')"
+            )
+        thinking = llm["thinking"]
+        if not isinstance(thinking, str) or thinking not in THINKING_LEVELS:
+            raise ValueError(
+                "manifest.llm.thinking: expected one of "
+                f"{', '.join(THINKING_LEVELS)}"
             )
 
     # If api_key_env is set without api_key, env_file must be provided

@@ -3,7 +3,9 @@
 Gives an agent the ability to split its consciousness into focused worker
 fragments that operate in parallel on the same working directory.  Each
 emanation is a disposable ChatSession with a curated tool surface — not an
-agent.  Results are persisted in daemon run directories; completion is surfaced via a compact system notification.
+agent.  Results are persisted in daemon run directories; every terminal outcome
+(done / failed / cancelled / timeout) is surfaced exactly once via a compact
+system notification, so the parent can dispatch and go idle without polling.
 
 Usage:
     Agent(capabilities=["daemon"])
@@ -174,6 +176,39 @@ def _claude_code_env() -> dict[str, str]:
     for key in _CLAUDE_CODE_STRIP_ENV:
         env.pop(key, None)
     return env
+
+
+def _normalize_claude_usage(usage: dict | None) -> dict | None:
+    """Normalize a Claude Code stream-json ``usage`` block to UI totals.
+
+    Claude Code's final ``result`` event carries a ``usage`` block like::
+
+        {"input_tokens": 6950, "cache_creation_input_tokens": 3068,
+         "cache_read_input_tokens": 15621, "output_tokens": 4, ...}
+
+    Returns ``{"input", "output", "cached", "thinking"}`` with::
+
+        cached = cache_read_input_tokens + cache_creation_input_tokens
+
+    ``thinking`` is 0 — Claude Code does not surface a separate thinking-token
+    count in this block. Returns ``None`` if ``usage`` is missing/not a dict or
+    carries no countable tokens, so callers can skip persistence cleanly.
+    """
+    if not isinstance(usage, dict):
+        return None
+
+    def _int(value) -> int:
+        return value if isinstance(value, int) else 0
+
+    input_tokens = _int(usage.get("input_tokens"))
+    output_tokens = _int(usage.get("output_tokens"))
+    cached = (_int(usage.get("cache_read_input_tokens"))
+              + _int(usage.get("cache_creation_input_tokens")))
+    thinking = 0
+    if not (input_tokens or output_tokens or cached or thinking):
+        return None
+    return {"input": input_tokens, "output": output_tokens,
+            "cached": cached, "thinking": thinking}
 
 
 # Safe CLI option key: letters/digits with '-' or '_' separators. No leading
@@ -491,8 +526,10 @@ def get_schema(lang: str = "en") -> dict:
 class DaemonManager:
     """Manages subagent (emanation) lifecycle."""
 
-    # Minimum text length to trigger a parent notification.
-    # Short results (e.g. "[cancelled]") are suppressed to avoid notification storms.
+    # Minimum text length to trigger a parent notification for a *successful*
+    # (done) run — short happy-path results are suppressed to avoid notification
+    # storms. Non-success terminal states (failed / cancelled / timeout) always
+    # notify regardless of length; see _on_emanation_done.
     _NOTIFY_MIN_LEN = 20
 
     def __init__(self, agent: "Agent", max_emanations: int = 100,
@@ -522,6 +559,14 @@ class DaemonManager:
         # watchdog owns them.
         self._cli_procs: list[subprocess.Popen] = []
         self._cli_proc_groups: dict[str, set[subprocess.Popen]] = {}
+        # LingTai-initiated termination reason per tracked proc, keyed by
+        # id(proc) and guarded by ``_cli_lock``. Stamped at the out-of-loop kill
+        # sites (reclaim/agent_stop/parent refresh via _drain_all_cli_procs,
+        # batch timeout via _kill_cli_group) *before* SIGTERM is sent, then read
+        # back when the read loop sees the resulting -15/143 returncode so the
+        # exit is attributed to the local cause instead of an opaque
+        # "claude CLI exited with code 143". See GH #455.
+        self._cli_term_reasons: dict[int, str] = {}
         self._cli_lock = threading.Lock()
         # Dedicated pool for CLI-backend `ask` follow-ups so they run off the
         # caller's tool-dispatch thread. The agent's `daemon(action="ask")` call
@@ -934,6 +979,53 @@ class DaemonManager:
             f"{task}"
         )
 
+    @staticmethod
+    def _daemon_codex_session_anchor(run_dir) -> str:
+        """Return the per-run Codex cache-affinity anchor for a daemon."""
+        return str((run_dir.path / "daemon.json").resolve())
+
+    def _daemon_provider_defaults(
+        self,
+        provider: str,
+        base_defaults: dict | None,
+        run_dir,
+    ) -> dict | None:
+        """Return provider defaults for a daemon-scoped LLM service.
+
+        Daemon-scoped services preserve the parent/preset provider defaults for
+        every provider, so a non-Codex daemon keeps the same adapter behavior as
+        its parent. Codex is the one exception: the normal Codex agent path uses
+        the agent's resolved ``init.json`` path as its cache-affinity anchor, but
+        a LingTai daemon is a disposable run, so Codex daemon calls need a per-run
+        anchor rather than the parent agent's anchor; otherwise parent and child
+        traffic collide in one REST cache slot.
+        """
+        provider_key = str(provider).lower()
+        bucket = dict(base_defaults or {})
+        if provider_key == "codex":
+            # A manifest-level fixed id is an agent-level override; daemon traffic
+            # must still use the daemon run identity so it gets its own cache slot.
+            bucket.pop("codex_session_id", None)
+            bucket["codex_session_anchor"] = self._daemon_codex_session_anchor(run_dir)
+        if not bucket:
+            return None
+        return {provider_key: bucket}
+
+    @staticmethod
+    def _llm_defaults_from_manifest(llm: dict) -> dict:
+        """Extract adapter-consulted defaults from a preset ``manifest.llm``."""
+        keys = (
+            "api_compat",
+            "base_url",
+            "codex_session_id",
+            "codex_session_anchor",
+            "codex_thread_salt",
+            "compact_threshold",
+            "default_headers",
+            "max_rpm",
+        )
+        return {key: llm[key] for key in keys if key in llm}
+
     def _build_tool_surface(
         self,
         requested: list[str],
@@ -1234,11 +1326,44 @@ class DaemonManager:
                 model=preset_llm["model"],
                 api_key=api_key,
                 base_url=preset_llm.get("base_url"),
+                provider_defaults=self._daemon_provider_defaults(
+                    preset_llm["provider"],
+                    self._llm_defaults_from_manifest(preset_llm),
+                    run_dir,
+                ),
             )
             effective_model = preset_llm["model"]
         else:
-            service = self._agent.service
-            effective_model = self._default_model
+            # No preset: build a fresh daemon-scoped service mirroring the parent
+            # service rather than reusing ``self._agent.service``. Every provider
+            # keeps the parent's provider defaults; Codex additionally gets a
+            # per-run cache anchor (and drops any fixed session id) so this run
+            # gets its own session_id/thread_id/prompt_cache_key triple instead
+            # of colliding with the parent agent's cache slot.
+            from lingtai.llm.service import LLMService
+            parent_service = self._agent.service
+            parent_provider = str(getattr(parent_service, "provider", "")).lower()
+            parent_defaults = getattr(parent_service, "_provider_defaults", {}) or {}
+            parent_key_resolver = getattr(parent_service, "_key_resolver", None)
+            parent_api_key = (
+                parent_key_resolver(parent_provider)
+                if callable(parent_key_resolver)
+                else None
+            )
+            service = LLMService(
+                provider=parent_service.provider,
+                model=parent_service.model,
+                api_key=parent_api_key,
+                base_url=getattr(parent_service, "_base_url", None),
+                key_resolver=parent_key_resolver,
+                provider_defaults=self._daemon_provider_defaults(
+                    parent_provider,
+                    parent_defaults.get(parent_provider, {}),
+                    run_dir,
+                ),
+                context_window=getattr(parent_service, "_context_window", 1_000_000),
+            )
+            effective_model = parent_service.model
 
         session = service.create_session(
             system_prompt=run_dir.prompt_path.read_text(encoding="utf-8"),
@@ -1426,6 +1551,10 @@ class DaemonManager:
         semantics don't map cleanly onto the kernel's LLM-adapter
         accounting. Mixing them into ``sum_token_ledger`` would
         produce a misleading "lifetime totals" number for the parent.
+        The final ``result`` event's ``usage`` is instead persisted to
+        ``daemon.json.cli_tokens`` via ``record_cli_tokens`` — UI-only,
+        never touching either token ledger — so the TUI ``/daemons``
+        view can still surface what the CLI run cost.
 
         Falls back to the legacy JSONL scan if no ``session_id`` ever
         appears in the stream.
@@ -1549,8 +1678,10 @@ class DaemonManager:
             # read/write semantics differ from the kernel's LLM adapters)
             # and create a misleading "lifetime totals" number. Spend
             # remains visible to the agent via daemon(check) — the
-            # `last_output` field, cli_output events, and stderr — but
-            # not in sum_token_ledger.
+            # `last_output` field, cli_output events, and stderr — and,
+            # for UI display, the final result event's usage is persisted
+            # separately to daemon.json.cli_tokens (see the result-event
+            # handler below). Neither path touches sum_token_ledger.
 
         def _handle_user_event(event: dict) -> None:
             # User events in stream-json mode carry tool_result blocks back
@@ -1605,6 +1736,24 @@ class DaemonManager:
                 elif etype == "result":
                     final_result_text = event.get("result") or ""
                     final_is_error = bool(event.get("is_error"))
+                    # Persist Claude Code's reported token usage for UI
+                    # display only. This goes to daemon.json.cli_tokens via
+                    # record_cli_tokens — NOT to append_tokens — so the
+                    # parent/daemon token ledgers stay free of external CLI
+                    # billing (whose cache semantics don't match the kernel
+                    # adapter accounting). See the note in this method's
+                    # docstring and run_dir.record_cli_tokens.
+                    usage = _normalize_claude_usage(event.get("usage"))
+                    if usage is not None:
+                        try:
+                            run_dir.record_cli_tokens(
+                                input=usage["input"], output=usage["output"],
+                                cached=usage["cached"],
+                                thinking=usage["thinking"],
+                                raw=event.get("usage"),
+                            )
+                        except Exception:
+                            pass
                     # If there are still tool_use blocks pending without
                     # a matching tool_result (shouldn't happen on success,
                     # but be defensive), clear them so daemon.json's
@@ -1632,8 +1781,12 @@ class DaemonManager:
 
         if proc.returncode != 0:
             detail = stderr_tail or (final_result_text or "")
+            attributed = self._attributed_cli_exit(
+                proc, "claude", detail[-500:], run_dir,
+            )
             exc = RuntimeError(
-                f"claude CLI exited with code {proc.returncode}: "
+                attributed
+                or f"claude CLI exited with code {proc.returncode}: "
                 f"{detail[-500:]}"
             )
             run_dir.mark_failed(exc)
@@ -1877,8 +2030,12 @@ class DaemonManager:
 
         if proc.returncode != 0:
             detail = stderr_tail or "\n".join(agent_message_texts[-3:])
+            attributed = self._attributed_cli_exit(
+                proc, "codex", detail[-500:], run_dir,
+            )
             exc = RuntimeError(
-                f"codex CLI exited with code {proc.returncode}: "
+                attributed
+                or f"codex CLI exited with code {proc.returncode}: "
                 f"{detail[-500:]}"
             )
             run_dir.mark_failed(exc)
@@ -1910,12 +2067,19 @@ class DaemonManager:
         text: str,
         run_dir: DaemonRunDir | None = None,
     ) -> None:
-        """Publish a compact daemon completion event via .notification/system.json.
+        """Publish a compact daemon terminal event via .notification/system.json.
 
-        Full daemon output belongs in the run directory and is inspectable via
+        Fired on every terminal status (done / failed / cancelled / timeout) so
+        the parent agent can dispatch a daemon and safely go idle: the kernel
+        notification sync wakes it when the run ends, no polling required. Full
+        daemon output belongs in the run directory and is inspectable via
         ``daemon(action="check", id=...)``.  The parent notification is only a
         wake signal with provenance, bounded preview, and the inspection path.
         It must not arrive as ordinary ``MSG_REQUEST`` text.
+
+        Once-only delivery is the caller's responsibility via
+        ``DaemonRunDir.claim_terminal_notification`` (terminal path); follow-up
+        (``ask``) notifications intentionally reuse this same compact format.
         """
         preview = text or ""
         if len(preview) > self._NOTIFICATION_PREVIEW_MAX:
@@ -1927,11 +2091,23 @@ class DaemonManager:
             f"Daemon {em_id} {status}.",
             f"Inspect with daemon(action=\"check\", id=\"{em_id}\").",
         ]
+        recorded_error = None
         if run_dir is not None:
+            snapshot = run_dir.state_snapshot()
+            task = (snapshot.get("task") or "").strip()
+            if task:
+                if len(task) > self._NOTIFICATION_PREVIEW_MAX:
+                    task = task[: self._NOTIFICATION_PREVIEW_MAX] + "..."
+                parts.append(f"Task: {task}")
             parts.append(f"Run directory: {run_dir.path}")
-            result_path = run_dir.state_snapshot().get("result_path")
+            result_path = snapshot.get("result_path")
             if result_path:
                 parts.append(f"Result file: {result_path}")
+            recorded_error = snapshot.get("error")
+        if recorded_error:
+            err_type = recorded_error.get("type", "error")
+            err_msg = (recorded_error.get("message") or "")[:self._NOTIFICATION_PREVIEW_MAX]
+            parts.append(f"Error: {err_type}: {err_msg}".rstrip(": "))
         if preview:
             parts.append(f"Preview:\n{preview}")
         body = "\n".join(parts)
@@ -3212,6 +3388,20 @@ class DaemonManager:
                 elif etype == "result":
                     final_result_text = event.get("result") or ""
                     final_is_error = bool(event.get("is_error"))
+                    # Accumulate the follow-up's token usage into
+                    # daemon.json.cli_tokens for UI display — same UI-only,
+                    # never-ledger policy as the initial emanation run.
+                    usage = _normalize_claude_usage(event.get("usage"))
+                    if usage is not None:
+                        try:
+                            run_dir.record_cli_tokens(
+                                input=usage["input"], output=usage["output"],
+                                cached=usage["cached"],
+                                thinking=usage["thinking"],
+                                raw=event.get("usage"),
+                            )
+                        except Exception:
+                            pass
 
             if time.monotonic() >= deadline:
                 timed_out = True
@@ -3739,8 +3929,12 @@ class DaemonManager:
 
         if proc.returncode != 0:
             detail = stderr_tail or "\n".join(text_chunks[-3:])
+            attributed = self._attributed_cli_exit(
+                proc, backend_name, detail[-500:], run_dir,
+            )
             exc = RuntimeError(
-                f"{backend_name} CLI exited with code {proc.returncode}: "
+                attributed
+                or f"{backend_name} CLI exited with code {proc.returncode}: "
                 f"{detail[-500:]}"
             )
             run_dir.mark_failed(exc)
@@ -3923,8 +4117,12 @@ class DaemonManager:
 
         if proc.returncode != 0:
             detail = stderr_tail or output
+            attributed = self._attributed_cli_exit(
+                proc, "qwen-code", detail[-500:], run_dir,
+            )
             exc = RuntimeError(
-                f"qwen-code CLI exited with code {proc.returncode}: "
+                attributed
+                or f"qwen-code CLI exited with code {proc.returncode}: "
                 f"{detail[-500:]}"
             )
             run_dir.mark_failed(exc)
@@ -4349,8 +4547,12 @@ class DaemonManager:
 
         if proc.returncode != 0:
             detail = stderr_tail or "\n".join(text_chunks[-3:])
+            attributed = self._attributed_cli_exit(
+                proc, "Cursor", detail[-500:], run_dir,
+            )
             exc = RuntimeError(
-                f"Cursor CLI exited with code {proc.returncode}: "
+                attributed
+                or f"Cursor CLI exited with code {proc.returncode}: "
                 f"{detail[-500:]}"
             )
             run_dir.mark_failed(exc)
@@ -4711,7 +4913,7 @@ class DaemonManager:
         # Kill all tracked CLI process groups first — this terminates child
         # shells/tools that cancel_event alone cannot reach (GH #122).
         # Snapshot under lock, kill outside to avoid holding lock during wait.
-        procs_to_kill = self._drain_all_cli_procs()
+        procs_to_kill = self._drain_all_cli_procs(reason=reason)
         for proc in procs_to_kill:
             try:
                 _kill_process_group(proc)
@@ -4784,6 +4986,11 @@ class DaemonManager:
         entry = self._emanations.get(em_id)
         if entry:
             elapsed = time.time() - entry["start_time"]
+        run_dir = entry.get("run_dir") if entry else None
+
+        # Derive a fallback status from the future result. The future returns
+        # text on cooperative exit (including the short ``[cancelled]`` sentinel
+        # a timed-out/reclaimed run returns) and raises on a hard failure.
         status = "done"
         try:
             text = future.result()
@@ -4795,16 +5002,41 @@ class DaemonManager:
             self._log("daemon_error", em_id=em_id,
                       exception=type(e).__name__, exception_message=str(e))
 
-        # Suppress notifications for short successful results to prevent
-        # notification storms. Failures always notify.
+        # The run directory's recorded state is authoritative for the terminal
+        # status: a cancelled/timed-out run returns the short ``[cancelled]``
+        # sentinel through the future, which would otherwise be misclassified as
+        # a tiny "done" and swallowed by the short-result gate below. Prefer it
+        # so every terminal status (done / failed / cancelled / timeout) is
+        # labelled and reported correctly, and the parent always learns the
+        # daemon terminated even when it failed silently.
+        if run_dir is not None:
+            try:
+                recorded = run_dir.state_snapshot().get("state")
+            except Exception:
+                recorded = None
+            if recorded in ("done", "failed", "cancelled", "timeout"):
+                status = recorded
+
+        # Suppress notifications only for short *successful* results to prevent
+        # notification storms. Every non-success terminal state (failed,
+        # cancelled, timeout) always notifies so the parent can safely go idle
+        # after dispatch and still learn the run ended.
         if status == "done" and len(text) < self._notify_threshold:
             self._log("daemon_result", em_id=em_id, status="suppressed_short",
                       text_length=len(text))
             return
 
-        run_dir = entry.get("run_dir") if entry else None
+        # Deliver exactly once per run: the done-callback can fire more than
+        # once for the same em_id (racing reclaim, re-entrant callbacks). The
+        # run directory owns the once-only claim, decoupled from the system
+        # channel's ref_id dedup so an earlier follow-up (``ask``) event sharing
+        # this run's ref_id cannot suppress the terminal notification.
+        if run_dir is not None and not run_dir.claim_terminal_notification():
+            self._log("daemon_terminal_notify_skipped_duplicate",
+                      em_id=em_id, status=status)
+            return
         self._publish_daemon_notification(
-            em_id, status=status, text=text, run_dir=run_dir
+            em_id, status=status, text=text, run_dir=run_dir,
         )
 
     # ------------------------------------------------------------------
@@ -4824,10 +5056,21 @@ class DaemonManager:
             self._cli_procs.append(proc)
             if group_id is not None:
                 self._cli_proc_groups.setdefault(group_id, set()).add(proc)
+            # CPython may recycle a previous proc's id() for this fresh object.
+            # Drop any stale termination reason left under that id (e.g. a kill
+            # stamped on a proc that then exited 0 before SIGTERM landed) so it
+            # cannot be mis-attributed to this new subprocess. See GH #455.
+            self._cli_term_reasons.pop(id(proc), None)
 
     def _unregister_cli_proc(self, proc: subprocess.Popen,
                              group_id: str | None = None) -> None:
-        """Detach *proc* from global and group tracking. Idempotent."""
+        """Detach *proc* from global and group tracking. Idempotent.
+
+        The recorded termination reason (if any) is intentionally NOT cleared
+        here: ``_unregister_cli_proc`` runs in the read-loop's ``finally`` block,
+        immediately before the returncode is classified, so the reason must
+        survive until ``_take_cli_term_reason`` consumes it.
+        """
         with self._cli_lock:
             try:
                 self._cli_procs.remove(proc)
@@ -4840,18 +5083,38 @@ class DaemonManager:
                     if not bucket:
                         del self._cli_proc_groups[group_id]
 
-    def _kill_cli_group(self, group_id: str) -> None:
+    def _note_cli_term_reason(self, proc: subprocess.Popen, reason: str) -> None:
+        """Record the LingTai-initiated termination *reason* for *proc*.
+
+        Called at the out-of-loop kill sites (reclaim/agent_stop/refresh and
+        batch timeout) just before SIGTERM. First reason wins so a follow-up
+        teardown kill cannot overwrite the original causal reason (e.g. a
+        timeout that is then swept by reclaim stays "timeout"). See GH #455.
+        """
+        with self._cli_lock:
+            self._cli_term_reasons.setdefault(id(proc), reason)
+
+    def _take_cli_term_reason(self, proc: subprocess.Popen) -> str | None:
+        """Pop and return the recorded termination reason for *proc*, if any."""
+        with self._cli_lock:
+            return self._cli_term_reasons.pop(id(proc), None)
+
+    def _kill_cli_group(self, group_id: str, reason: str = "timeout") -> None:
         """Kill only the CLI process groups owned by *group_id*.
 
         Snapshots the group's procs under the lock, detaches them from both
         the group index and the global list, then kills outside the lock so we
         never hold ``_cli_lock`` across a multi-second ``proc.wait``. Procs from
         other batches (and ungrouped ``ask`` procs) are left untouched.
+
+        *reason* (default "timeout", the only current caller) is stamped on each
+        proc before SIGTERM so the read loop can attribute the signal exit.
         """
         with self._cli_lock:
             bucket = self._cli_proc_groups.pop(group_id, None)
             procs_to_kill = list(bucket) if bucket else []
             for proc in procs_to_kill:
+                self._cli_term_reasons.setdefault(id(proc), reason)
                 try:
                     self._cli_procs.remove(proc)
                 except ValueError:
@@ -4859,13 +5122,73 @@ class DaemonManager:
         for proc in procs_to_kill:
             _kill_process_group(proc)
 
-    def _drain_all_cli_procs(self) -> list[subprocess.Popen]:
-        """Clear all CLI tracking and return the procs to kill (reclaim path)."""
+    def _drain_all_cli_procs(self, reason: str | None = None) -> list[subprocess.Popen]:
+        """Clear all CLI tracking and return the procs to kill (reclaim path).
+
+        When *reason* is given (agent_stop / parent refresh / reclaim) it is
+        stamped on each drained proc before the caller sends SIGTERM, so the
+        read loop attributes the resulting -15/143 exit to that local cause
+        instead of reporting an opaque CLI failure (GH #455).
+        """
         with self._cli_lock:
             procs_to_kill = list(self._cli_procs)
+            if reason is not None:
+                for proc in procs_to_kill:
+                    self._cli_term_reasons.setdefault(id(proc), reason)
             self._cli_procs.clear()
             self._cli_proc_groups.clear()
         return procs_to_kill
+
+    @staticmethod
+    def _signal_exit_name(returncode: int | None) -> str | None:
+        """Map a Popen returncode to a signal name, or None if not a signal.
+
+        Covers both subprocess conventions: negative (``-15``) when Python
+        reaps the child directly, and ``128 + signum`` (``143``) when the exit
+        propagates through a shell.
+        """
+        if returncode in (-15, 143):
+            return "SIGTERM"
+        if returncode in (-9, 137):
+            return "SIGKILL"
+        return None
+
+    def _attributed_cli_exit(
+        self,
+        proc: subprocess.Popen,
+        backend_name: str,
+        detail: str,
+        run_dir: "DaemonRunDir | None" = None,
+    ) -> str | None:
+        """Attribute a signal-terminated CLI exit to its local cause.
+
+        Returns a human-readable message naming the LingTai-initiated reason
+        (e.g. ``agent_stop`` / ``reclaim`` / ``timeout``) when this manager
+        recorded one before sending the signal, and records the reason on
+        *run_dir* for forensic inspection. The raw exit code is always kept in
+        the message. Returns ``None`` when the exit is not a signal we attribute
+        or no local reason was recorded — the caller then keeps its existing
+        opaque message so external/unknown SIGTERMs are not mislabeled as
+        deliberate cancellations. See GH #455.
+        """
+        reason = self._take_cli_term_reason(proc)
+        signal_name = self._signal_exit_name(getattr(proc, "returncode", None))
+        if signal_name is None or reason is None:
+            return None
+        if run_dir is not None:
+            try:
+                run_dir.record_cli_termination(
+                    reason=reason,
+                    signal_name=signal_name,
+                    returncode=proc.returncode,
+                )
+            except Exception:
+                pass
+        msg = (
+            f"{backend_name} CLI terminated by LingTai ({reason}, "
+            f"{signal_name}, code {proc.returncode})"
+        )
+        return f"{msg}: {detail}" if detail else msg
 
     def _arm_batch_done_cancel(self, futures: list,
                                cancel_event: threading.Event) -> None:
@@ -4937,49 +5260,14 @@ class DaemonManager:
             self._agent._log(event_type, **fields)
 
 
-def make_manager(agent: "Agent", max_emanations: int = 100,
-                 max_turns: int = DEFAULT_MAX_TURNS, timeout: float = 3600.0,
-                 notify_threshold: int = 20) -> DaemonManager:
-    """Build the ``DaemonManager`` bound to *agent* with the given limits.
-
-    Single source of truth for daemon-manager construction: both ``setup()`` (the
-    normal capability-registration path) and the SDK communication/execution
-    bundle bridge (``lingtai.core.communication_bundle``) build the manager
-    through this factory, so the bundle-hosted ``daemon`` tool runs against a
-    manager constructed byte-identically to the one ``setup()`` registers.
-    Constructing the manager neither spawns nor kills any process — only an
-    explicit ``emanate`` / ``ask`` / ``reclaim`` call does.
-    """
-    return DaemonManager(agent, max_emanations=max_emanations,
-                         max_turns=max_turns, timeout=timeout,
-                         notify_threshold=notify_threshold)
-
-
-def make_handler(agent: "Agent", max_emanations: int = 100,
-                 max_turns: int = DEFAULT_MAX_TURNS, timeout: float = 3600.0,
-                 notify_threshold: int = 20):
-    """Build the ``daemon`` tool handler bound to *agent*.
-
-    Returns the ``handle`` method of a freshly-built :class:`DaemonManager` (see
-    :func:`make_manager`). The handler is the same ``mgr.handle`` callable
-    ``setup()`` registers, so the SDK bundle bridge and the live capability path
-    share one behavior. The manager is otherwise unreferenced by callers that only
-    want the handler; use :func:`make_manager` directly when the manager object
-    itself is needed (as ``setup()`` does, to return it).
-    """
-    return make_manager(agent, max_emanations=max_emanations,
-                        max_turns=max_turns, timeout=timeout,
-                        notify_threshold=notify_threshold).handle
-
-
 def setup(agent: "Agent", max_emanations: int = 100,
           max_turns: int = DEFAULT_MAX_TURNS, timeout: float = 3600.0,
           notify_threshold: int = 20) -> DaemonManager:
     """Set up the daemon capability on an agent."""
     lang = agent._config.language
-    mgr = make_manager(agent, max_emanations=max_emanations,
-                       max_turns=max_turns, timeout=timeout,
-                       notify_threshold=notify_threshold)
+    mgr = DaemonManager(agent, max_emanations=max_emanations,
+                        max_turns=max_turns, timeout=timeout,
+                        notify_threshold=notify_threshold)
     schema = get_schema(lang)
     agent.add_tool("daemon", schema=schema, handler=mgr.handle,
                    description=get_description(lang))

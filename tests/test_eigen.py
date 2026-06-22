@@ -6,14 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from lingtai_kernel.base_agent import BaseAgent
-
-
-def make_mock_service():
-    svc = MagicMock()
-    svc.get_adapter.return_value = MagicMock()
-    svc.provider = "gemini"
-    svc.model = "gemini-test"
-    return svc
+from tests._service_helpers import make_gemini_mock_service as make_mock_service
+from tests._molt_helpers import write_session_journal as _write_session_journal
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +119,17 @@ def test_psyche_molt_uses_summary(tmp_path):
         # in the live interface before eigen runs (the wire layer records
         # assistant tool_calls before dispatching). _context_molt locates
         # this block by tc.id and replays it into the fresh session.
+        journal_path = _write_session_journal(agent)
         molt_wire_id = "toolu_test_molt_uses_summary"
         molt_summary = "Key finding: X=42. Task: analyze Y."
         agent._session._chat.interface.add_assistant_message([
             ToolCallBlock(
                 id=molt_wire_id,
                 name="psyche",
-                args={"object": "context", "action": "molt", "summary": molt_summary},
+                args={
+                    "object": "context", "action": "molt", "summary": molt_summary,
+                    "session_journal_path": journal_path,
+                },
             ),
         ])
 
@@ -140,6 +138,7 @@ def test_psyche_molt_uses_summary(tmp_path):
             "action": "molt",
             "summary": molt_summary,
             "_tc_id": molt_wire_id,
+            "session_journal_path": journal_path,
         })
         assert result["status"] == "ok"
         # The summary now lives in the replayed ToolCallBlock's args, not
@@ -351,18 +350,23 @@ def test_snapshot_written_on_agent_molt(tmp_path):
         iface.add_assistant_message([TextBlock(text="Hi.")])
 
         # The molt's own tool_call lives in the tail entry pre-molt.
+        journal_path = _write_session_journal(agent)
         molt_id = "toolu_test_snapshot_agent"
         molt_summary = "Briefing: completed task X, next is Y."
         iface.add_assistant_message([
             ToolCallBlock(
                 id=molt_id, name="psyche",
-                args={"object": "context", "action": "molt", "summary": molt_summary},
+                args={
+                    "object": "context", "action": "molt", "summary": molt_summary,
+                    "session_journal_path": journal_path,
+                },
             ),
         ])
 
         result = agent._intrinsics["psyche"]({
             "object": "context", "action": "molt",
             "summary": molt_summary, "_tc_id": molt_id,
+            "session_journal_path": journal_path,
         })
         assert result["status"] == "ok"
 

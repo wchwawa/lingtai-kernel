@@ -13,6 +13,7 @@ Key concepts:
 
 from __future__ import annotations
 
+import copy
 import json
 import queue
 import threading
@@ -32,11 +33,15 @@ from ..llm import (
     ToolCall,
 )
 from ..logging import get_logger
-from ..meta_block import build_meta, build_notification_payload
+from ..meta_block import (
+    build_meta,
+    build_notification_payload,
+    formal_tool_result_preview,
+    formal_tool_result_visible_len,
+)
 from ..session import SessionManager
 from ..tc_inbox import TCInbox
 from ..token_ledger import append_token_entry
-from ..tool_call_guard import ToolCallGuard
 from ..trace_redaction import redact_for_trajectory
 
 logger = get_logger()
@@ -419,13 +424,6 @@ class BaseAgent:
         self._tool_handlers: dict[str, Callable[[dict], dict]] = {}
         self._tool_schemas: list[FunctionSchema] = []
 
-        # Composable pre-dispatch guard for proposed tool calls.  Built once and
-        # threaded into every ToolExecutor the turn loop constructs.  The default
-        # empty chain preserves the existing ``default_allow`` pass-through:
-        # hosts/capabilities replace this with a populated ``ToolCallGuard`` to
-        # add policy without touching the executor construction sites.
-        self._tool_call_guard: ToolCallGuard = ToolCallGuard()
-
         # --- Wire intrinsic tools ---
         self._intrinsics: dict[str, Callable[[dict], dict]] = {}
         self._wire_intrinsics()
@@ -441,8 +439,8 @@ class BaseAgent:
 
         # _pending_mail_notifications removed — email arrivals now use
         # single-slot unread-digest (email.unread) instead of per-arrival
-        # system.notification pairs. Bounce/MCP/soul notifications still
-        # use system.notification but don't need per-ref tracking.
+        # notification pairs. Bounce/MCP/soul events publish their own
+        # `.notification/*.json` files and don't need per-ref tracking.
 
         # Notification sync state (filesystem-as-protocol redesign).
         # _notification_fp: last-seen `.notification/` fingerprint for
@@ -478,6 +476,25 @@ class BaseAgent:
         # See `meta_block.skeletonize_notification_holder` and
         # `meta_block.attach_active_notifications`.
         self._notification_live_holder: dict | None = None
+
+        # Latest provider-visible tool result carrying the live `_runtime`
+        # block (kernel runtime state + guidance).  Like the notification
+        # holder, `_runtime` is latest-only: when a newer dict result takes
+        # over, the prior holder's `_runtime` is stripped so stale runtime
+        # snapshots never accumulate in history.
+        # See `meta_block.attach_active_runtime`.
+        self._runtime_live_holder: dict | None = None
+
+        # Large-result notification threshold (chars).  When a main-agent
+        # tool result's serialized length exceeds this value, it becomes a
+        # pending large-result case.  A system-channel notification reminding
+        # the agent to use system(action="summarize") is only published once
+        # the combined length of all pending large-result cases exceeds 50000
+        # chars (the total-length gate; see
+        # base_agent/messaging.py:LARGE_RESULT_TOTAL_LEN_GATE).
+        # Default: 3000 chars.  Configurable only via manifest.summarize_notification_threshold
+        # in init.json + refresh — runtime mutation is not supported.
+        self._summarize_notification_threshold: int = 3000
 
         # Lifecycle
         self._shutdown = threading.Event()
@@ -825,13 +842,30 @@ class BaseAgent:
         from .messaging import _on_normal_mail
         _on_normal_mail(self, payload)
 
-    def _enqueue_system_notification(self, *, source: str, ref_id: str, body: str) -> str:
+    def _enqueue_system_notification(
+        self,
+        *,
+        source: str,
+        ref_id: str,
+        body: str,
+        skip_if_ref_id_exists: bool = False,
+    ) -> str:
         from .messaging import _enqueue_system_notification
-        return _enqueue_system_notification(self, source=source, ref_id=ref_id, body=body)
+        return _enqueue_system_notification(
+            self,
+            source=source,
+            ref_id=ref_id,
+            body=body,
+            skip_if_ref_id_exists=skip_if_ref_id_exists,
+        )
 
     def notify(self, sender: str, text: str) -> None:
         from .messaging import _notify
         _notify(self, sender, text)
+
+    def _rescan_large_tool_results(self) -> int:
+        from .messaging import _rescan_large_tool_results
+        return _rescan_large_tool_results(self)
 
     # ------------------------------------------------------------------
     # Soul (pass-throughs to soul_flow.py)
@@ -966,7 +1000,7 @@ class BaseAgent:
 
     # ------------------------------------------------------------------
     # Notification sync — filesystem-as-protocol replacement for tc_inbox.
-    # See notifications.py and discussions/notification-filesystem-redesign.md.
+    # See notifications.py for the notification filesystem design rationale.
     # ------------------------------------------------------------------
 
     def _sync_notifications(self) -> None:
@@ -982,7 +1016,7 @@ class BaseAgent:
         3. Otherwise, inject a new block appropriate for current state:
 
            * IDLE → splice ``(call, result)`` pair (impersonates a
-             voluntary ``system(action="notification")`` call from the
+             voluntary ``notification(action="check")`` call from the
              agent's perspective), post ``MSG_TC_WAKE`` so the run loop
              unblocks and ``_handle_tc_wake`` drives the next inference
              round off the existing wire — no fake user input, no meta
@@ -1038,7 +1072,7 @@ class BaseAgent:
         if self._state == AgentState.ASLEEP:
             # Notification arrival wakes the agent, then inject as IDLE.
             # The synthesized (call, result) pair impersonates a
-            # voluntary system(action="notification") call; MSG_TC_WAKE
+            # voluntary notification(action="check") call; MSG_TC_WAKE
             # unblocks the run loop so _handle_tc_wake drives one
             # inference round off the existing wire (no fake user
             # input, no meta prefix).
@@ -1091,7 +1125,7 @@ class BaseAgent:
                     "[system] Notification delivery could not be injected onto "
                     f"the wire after a heal attempt. Affected source(s): "
                     f"{', '.join(sources)}. Please query the current state by "
-                    "calling system(action=\"notification\") or read the "
+                    "calling notification(action=\"check\") or read the "
                     "producer files under .notification/ directly, then decide "
                     "whether to act. The kernel will not retry this delivery "
                     "until the on-disk state changes."
@@ -1201,9 +1235,14 @@ class BaseAgent:
     def _inject_notification_pair(self, notifications: dict) -> bool:
         """Inject a synthetic (call, result) pair for IDLE / ASLEEP states.
 
-        Builds ``system(action="notification")`` / ``<JSON dict>`` and
+        Builds ``notification(action="check")`` / ``<JSON dict>`` and
         appends to the wire interface.  Records the call_id for later
         stripping.
+
+        The synthesized pair is byte-shape-identical to a voluntary
+        ``notification(action="check")`` read so the LLM cannot distinguish
+        a kernel-injected delivery from one it issued itself; the
+        ``_synthesized: true`` body flag remains the only marker.
 
         The assistant turn carries only the synthetic ``ToolCallBlock``.
         The model-visible notification details and guidance live in the
@@ -1288,13 +1327,18 @@ class BaseAgent:
 
         notifications_with_guidance = build_notification_payload(notifications)
 
+        # Nest the canonical notification payload under the unified ``_meta``
+        # envelope so the synthesized pair presents notifications the same way
+        # an ACTIVE tool result does (``_meta.notifications`` +
+        # ``_meta.notification_guidance``).
         body = {
             "_synthesized": True,
-            **notifications_with_guidance,
+            "_meta": dict(notifications_with_guidance),
         }
-        # Flatten meta into body top-level — matches real tool results
-        # (status/result fields then current_time/context/stamina_left_seconds
-        # at the same level), so the model sees the same shape it's used to.
+        # Flatten build_meta fields into body top-level — these are the
+        # synthesized pair's own freshness/uniqueness fields (current_time,
+        # context, stamina_left_seconds, injection_seq), distinct from the
+        # four tool-result-metadata blocks under ``_meta``.
         body.update(meta)
         # Store body as a dict (not a JSON string) so it can be mutated
         # in-place when this pair is skeletonized later.  All adapters
@@ -1335,22 +1379,22 @@ class BaseAgent:
 
         # ``summary_text`` is log-only.  Do not place it in a TextBlock on the
         # wire: successful notification sync should be a structured
-        # system(action="notification") call/result pair, not a visible
+        # notification(action="check") call/result pair, not a visible
         # synthesized diary/text-input row.
         # call.args carries injection_seq only — real tool calls don't have
         # current_time/context/stamina in their args (those live in results).
         # The seq is enough to defeat byte-equality on the assistant turn.
         call_block = ToolCallBlock(
             id=call_id,
-            name="system",
+            name="notification",
             args={
-                "action": "notification",
+                "action": "check",
                 "injection_seq": self._notification_inject_seq,
             },
         )
         result_block = ToolResultBlock(
             id=call_id,
-            name="system",
+            name="notification",
             content=content_dict,  # dict, not JSON string — mutable for skeletonization
             synthesized=True,
         )
@@ -1387,7 +1431,60 @@ class BaseAgent:
             summary=summary_text,
             meta=meta,
         )
+        # Reconstruct the full four-block ``_meta`` envelope for the durable
+        # snapshot so the TUI /notification view shows the same ``_meta.*``
+        # blocks (tool_meta/agent_meta/guidance/notifications/
+        # notification_guidance) a synthesized pair would carry.  The live wire
+        # body keeps its notification-only ``_meta``; this is logging-side only.
+        from ..meta_block import build_synthetic_meta_envelope
+        synthetic_envelope = build_synthetic_meta_envelope(
+            self,
+            notifications_with_guidance,
+            call_id=call_id,
+        )
+        self._log_notification_block_injected(
+            synthetic_envelope,
+            mode="synthetic_notification_pair",
+            call_id=call_id,
+        )
         return True
+
+    def _log_notification_block_injected(
+        self,
+        meta_envelope: dict,
+        *,
+        mode: str,
+        call_id: str | None = None,
+    ) -> None:
+        """Persist a durable notification_block_injected event capturing the
+        full ``_meta`` envelope the model saw.
+
+        Best-effort: any exception is swallowed so callers are never broken by a
+        logging failure.  ``meta_envelope`` is the complete four-block envelope
+        — ``tool_meta``, ``agent_meta``, ``guidance``, plus ``notifications`` and
+        ``notification_guidance`` — exactly as it appears under the tool result's
+        ``_meta`` key (ACTIVE) or as reconstructed for the synthesized pair
+        (IDLE/ASLEEP, via ``build_synthetic_meta_envelope``).
+
+        The envelope is persisted under a top-level ``_meta`` field on the event
+        so the TUI ``/notification`` view renders ``_meta.tool_meta`` /
+        ``_meta.agent_meta`` / ``_meta.guidance`` / ``_meta.notification_guidance``
+        / ``_meta.notifications`` directly.  A deep copy is stored so later
+        in-place skeletonization or nested mutation of the live holder does not
+        corrupt the logged snapshot.
+        """
+        try:
+            notifications = meta_envelope.get("notifications", {})
+            sources = sorted(notifications.keys()) if isinstance(notifications, dict) else []
+            self._log(
+                "notification_block_injected",
+                mode=mode,
+                call_id=call_id or "",
+                sources=sources,
+                _meta=copy.deepcopy(meta_envelope),
+            )
+        except Exception:
+            pass
 
     def _persist_soul_entry(self, result: dict, mode: str = "flow", source: str = "agent") -> None:
         from ..intrinsics.soul.flow import _persist_soul_entry
@@ -1658,6 +1755,12 @@ class BaseAgent:
                 ledger_path = self._working_dir / "logs" / "token_ledger.jsonl"
                 model = getattr(self._session, "_model", None) or getattr(self.service, "model", None)
                 endpoint = getattr(self.service, "_base_url", None)
+                ledger_extra = {"source": ledger_source}
+                usage_extra = getattr(usage, "extra", None)
+                if isinstance(usage_extra, dict):
+                    ledger_extra.update(
+                        {k: v for k, v in usage_extra.items() if v is not None}
+                    )
                 append_token_entry(
                     ledger_path,
                     input=usage.input_tokens,
@@ -1666,7 +1769,7 @@ class BaseAgent:
                     cached=usage.cached_tokens,
                     model=model,
                     endpoint=endpoint,
-                    extra={"source": ledger_source},
+                    extra=ledger_extra,
                 )
             except Exception as e:
                 logger.warning(f"[{self.agent_name}] Failed to append token ledger: {e}")
@@ -1698,11 +1801,250 @@ class BaseAgent:
         """
 
     def _on_tool_result_hook(
-        self, tool_name: str, tool_args: dict, result: dict
+        self,
+        tool_name: str,
+        tool_args: dict,
+        result: dict,
+        *,
+        tool_call_id: str | None = None,
     ) -> str | None:
         """Hook called after each tool execution.
 
         If this returns a non-None string, the current request processing
         returns immediately with that string as the result text.
+
+        ``tool_call_id`` is the provider-assigned id for this tool call,
+        passed directly by ToolExecutor so no heuristic scan is needed.
+
+        Checks whether the tool result exceeds the large-result notification
+        threshold and publishes a system-channel notification if so.  This
+        hook sees main-agent tool results only; daemon child events arrive
+        via a separate path and are not routed here.
         """
+        self._maybe_notify_large_tool_result(tool_name, result, tool_call_id=tool_call_id)
         return None
+
+    def _maybe_notify_large_tool_result(
+        self,
+        tool_name: str,
+        result: object,
+        *,
+        tool_call_id: str | None = None,
+    ) -> None:
+        """Publish a system notification when a tool result exceeds the threshold.
+
+        Called from ``_on_tool_result_hook``.
+
+        Excludes ``daemon_tool_result`` tool names — those are child-daemon
+        result relays, not main-agent results.  (The bare ``daemon`` tool is
+        NOT excluded: it is a normal main-agent capability whose results are
+        legitimately subject to this check.)
+
+        For spill manifests (results capped by ToolExecutor and written to a
+        sidecar file), uses ``original_char_count`` as the effective length
+        when present — the wire-visible manifest is small, but the agent
+        still needs to be reminded to summarize the large original.  The
+        notification body includes the spill path so the agent knows where to
+        read the full content.  Spill manifests whose ``original_char_count``
+        is at or below the threshold are skipped.
+
+        ``tool_call_id`` is the provider-assigned id received directly from
+        ToolExecutor.  A heuristic scan of the pending assistant turn is used
+        only as a fallback when the id is not provided.
+        """
+        from ..tool_result_artifacts import is_spill_manifest
+        from .messaging import (
+            DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD,
+            LARGE_RESULT_TOTAL_LEN_GATE,
+            _pending_large_result_total_len,
+        )
+
+        threshold = getattr(
+            self, "_summarize_notification_threshold", DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD
+        )
+        if threshold <= 0:
+            return
+
+        if result is None:
+            return
+
+        # Exclude daemon child result relays; this hook sees main-agent results.
+        if tool_name == "daemon_tool_result":
+            return
+
+        # Determine effective length.  For spill manifests the wire-visible
+        # content is already capped, but the *original* payload may have been
+        # large; use original_char_count when available so the agent still gets
+        # a reminder to summarize if the original exceeded the threshold.
+        is_spill = is_spill_manifest(result)
+        if is_spill:
+            original_char_count = result.get("original_char_count") if isinstance(result, dict) else None  # type: ignore[union-attr]
+            if not isinstance(original_char_count, int) or original_char_count <= threshold:
+                return
+            result_len = original_char_count
+            spill_path = result.get("spill_path") if isinstance(result, dict) else None  # type: ignore[union-attr]
+            preview_text = None  # do not show raw spill payload as preview
+        else:
+            # Compute length/preview of the formal payload only. Runtime metadata
+            # (notably _meta.notifications / _meta.guidance) is not tool-result
+            # content and must not drive summarize reminders.
+            result_len = formal_tool_result_visible_len(result)
+            preview_text = formal_tool_result_preview(result, 200)
+
+            if result_len <= threshold:
+                return
+            spill_path = None
+
+        # Total-length gate: suppress the notification until the combined
+        # effective length of all pending large-result cases above the threshold
+        # is strictly greater than LARGE_RESULT_TOTAL_LEN_GATE (>50000 chars).
+        # Below that total this stays quiet to avoid repeated wasteful
+        # interruptions; the per-turn rescan (_rescan_large_tool_results) is the
+        # authoritative emitter and will fire the whole batch once the gate is
+        # met.  We sum pending cases already in live history; this just-arrived
+        # result may not be committed yet, so the gate never fires early.
+        pending_total = _pending_large_result_total_len(self)
+        if pending_total <= LARGE_RESULT_TOTAL_LEN_GATE:
+            self._log(
+                "large_tool_result_notification_gated",
+                tool_name=tool_name,
+                result_len=result_len,
+                threshold=threshold,
+                pending_total=pending_total,
+                gate=LARGE_RESULT_TOTAL_LEN_GATE,
+            )
+            return
+
+        # Resolve the tool_call_id.  ToolExecutor passes it directly; fall back
+        # to a heuristic scan of the pending assistant turn only if not provided.
+        if tool_call_id is None:
+            tool_call_id = "<see your conversation history>"
+            try:
+                from ..llm.interface import ToolCallBlock, ToolResultBlock
+                chat = getattr(self, "_chat", None)
+                iface = getattr(chat, "interface", None) if chat is not None else None
+                if iface is not None:
+                    entries = getattr(iface, "_entries", [])
+                    answered_ids: set[str] = set()
+                    for entry in entries:
+                        if entry.role == "user":
+                            for blk in entry.content:
+                                if isinstance(blk, ToolResultBlock):
+                                    answered_ids.add(blk.id)
+                    for entry in reversed(entries):
+                        if entry.role != "assistant":
+                            continue
+                        for blk in entry.content:
+                            if (
+                                isinstance(blk, ToolCallBlock)
+                                and blk.name == tool_name
+                                and blk.id not in answered_ids
+                            ):
+                                tool_call_id = blk.id
+                                break
+                        if tool_call_id != "<see your conversation history>":
+                            break
+            except Exception:
+                pass
+
+        _threshold_policy = (
+            f"This reminder is batched: it only appears once the combined length of "
+            f"pending large-result cases (each above the {threshold}-char threshold) "
+            f"exceeds {LARGE_RESULT_TOTAL_LEN_GATE} chars. "
+            f"The threshold ({threshold} chars, default {DEFAULT_SUMMARIZE_NOTIFICATION_THRESHOLD}) "
+            f"is set via manifest.summarize_notification_threshold "
+            f"in init.json and takes effect after system(action='refresh'). "
+            f"It cannot be changed temporarily at runtime. "
+            f"If you intentionally keep large results visible, you must either: "
+            f"(a) summarize/digest all pending large-result cases in one deliberate batch, or "
+            f"(b) tolerate these repeated reminders until you update the persistent config and refresh."
+        )
+        _dismiss_policy = (
+            "Dismiss policy: notification(action='dismiss_event'/'dismiss_ref') "
+            "can acknowledge and clear this reminder as an escape hatch — e.g. for "
+            "stale or pre-molt refs that can no longer be summarized. "
+            "Summarization via system(action='summarize') remains preferred: it "
+            "replaces the context-visible payload with your own summary and "
+            "auto-clears the reminder. Dismissal only clears the notification; "
+            "the original result stays in chat history and events.jsonl. "
+            "Notification/guidance metadata under _meta is not formal result content "
+            "and should not be summarized as the tool result body."
+        )
+        if is_spill and spill_path:
+            body = (
+                f"[large tool result — spilled] tool_name={tool_name!r} tool_call_id={tool_call_id}\n"
+                f"Original result length: {result_len} chars "
+                f"(current summarize notification threshold: {threshold} chars).\n"
+                f"The result was too large for the context window and was written to: {spill_path!r}\n"
+                f"Read the sidecar file to access the full content, then call:\n"
+                f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
+                f"to replace the context-visible spill manifest with your own summary.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
+                f"{_threshold_policy}\n"
+                f"The full original remains in the sidecar file and in events.jsonl by tool_call_id."
+            )
+        elif is_spill:
+            body = (
+                f"[large tool result — spilled] tool_name={tool_name!r} tool_call_id={tool_call_id}\n"
+                f"Original result length: {result_len} chars "
+                f"(current summarize notification threshold: {threshold} chars).\n"
+                f"The result was spilled to a sidecar file (path not available). "
+                f"Check the spill manifest in your conversation history for the path.\n"
+                f"After reading the sidecar, call:\n"
+                f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
+                f"to replace the context-visible spill manifest with your own summary.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
+                f"{_threshold_policy}"
+            )
+        else:
+            body = (
+                f"[large tool result] tool_name={tool_name!r} tool_call_id={tool_call_id}\n"
+                f"Result length: {result_len} chars "
+                f"(current summarize notification threshold: {threshold} chars).\n"
+                f"Preview (first 200 chars): {preview_text!r}\n\n"
+                f"After you have digested this result, call:\n"
+                f"  system(action=\"summarize\", items=[{{\"tool_call_id\": \"{tool_call_id}\", \"summary\": \"<your summary>\"}}])\n"
+                f"to replace the context-visible payload with your own summary.\n"
+                f"Large-result cleanup is background context hygiene, not a higher-priority instruction: "
+                f"if a human/chat notification is pending, handle the human first. If this result still "
+                f"matters for the task, digest it and call system(action='summarize') for the tool_call_id; "
+                f"successful summarize clears the reminder automatically. Do not repeatedly summarize "
+                f"cleanup metadata or _meta notifications/guidance; summarize only the formal "
+                f"substantive result once, then continue.\n"
+                f"{_dismiss_policy}\n"
+                f"{_threshold_policy}\n"
+                f"The full original remains retrievable from events.jsonl by tool_call_id."
+            )
+
+        try:
+            self._enqueue_system_notification(
+                source="large_tool_result",
+                ref_id=f"large_tool_result:{tool_call_id}",
+                body=body,
+            )
+            self._log(
+                "large_tool_result_notification_published",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                result_len=result_len,
+                threshold=threshold,
+                is_spill=is_spill,
+            )
+        except Exception as exc:
+            self._log(
+                "large_tool_result_notification_failed",
+                tool_name=tool_name,
+                error=str(exc),
+            )

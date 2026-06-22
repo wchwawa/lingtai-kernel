@@ -17,7 +17,12 @@ from ..safety_limits import (
 )
 from ..tool_executor import ToolExecutor
 from ..tool_result_artifacts import CompactionStats, compact_oversized_history
-from ..meta_block import attach_active_notifications, build_meta, render_meta
+from ..meta_block import (
+    attach_active_notifications,
+    attach_active_runtime,
+    build_meta,
+    render_meta,
+)
 from ..sent_message_tracker import SEND_TOOLS, SEND_ACTIONS, CHECK_ACTIONS
 from ..time_veil import now_iso
 
@@ -174,7 +179,7 @@ def _publish_tool_loop_guard_notification(
                 "from those blocked calls. Do not re-issue the same blocked "
                 "tool call(s) unchanged. Continue with a different approach, "
                 "summarize the blocked/completed work, or ask the human for "
-                "direction, then dismiss with system(action='dismiss', "
+                "direction, then dismiss with notification(action='dismiss_channel', "
                 "channel='tool_loop_guard', reason='handled')."
             ),
             data={
@@ -783,9 +788,11 @@ def _handle_message(agent, msg: Message) -> None:
 _MOLT_WARNING_GENTLE = (
     "[system] Context at {pressure} — consider molt. See 'Performing a Molt' "
     "in your procedures for the recipe (tend pad / lingtai / knowledge / "
-    "skills / session journal, then `psyche(object=context, action=molt, "
-    "summary=...)`). Molt is yours to perform — do it deliberately while "
-    "context is still cheap."
+    "skills, write the session-journal entry, then `psyche(object=context, "
+    "action=molt, summary=..., session_journal_path=...)`). The journal path "
+    "is required — molt is refused before any context is shed without a valid "
+    "one. Molt is yours to perform — do it deliberately while context is still "
+    "cheap."
 )
 
 _MOLT_WARNING_URGENT = (
@@ -795,9 +802,10 @@ _MOLT_WARNING_URGENT = (
     "the request outright — at which point the kernel's overflow recovery "
     "kicks in and silently trims history to retry, which can discard data "
     "you would have wanted to keep. Wrap up the current sub-step if you "
-    "must, then tend the stores (pad / lingtai / knowledge / skills / "
-    "session journal) and call `psyche(object=context, action=molt, "
-    "summary=...)`. The kernel will not molt you — this is yours to do, "
+    "must, then tend the stores (pad / lingtai / knowledge / skills), write "
+    "the session-journal entry, and call `psyche(object=context, action=molt, "
+    "summary=..., session_journal_path=...)` — the journal path is required or "
+    "the molt is refused. The kernel will not molt you — this is yours to do, "
     "and the longer you wait the more cramped the molt becomes. See "
     "'Performing a Molt' in your procedures."
 )
@@ -906,7 +914,9 @@ def _handle_request(agent, msg: Message) -> None:
         logger_fn=agent._log,
         meta_fn=lambda: build_meta(agent),
         working_dir=agent._working_dir,
-        tool_call_guard=getattr(agent, "_tool_call_guard", None),
+        summarize_notification_threshold=getattr(
+            agent, "_summarize_notification_threshold", None
+        ),
     )
     content = agent._pre_request(msg)
     meta = build_meta(agent)
@@ -919,6 +929,15 @@ def _handle_request(agent, msg: Message) -> None:
     # unrelated tool results; delivery happens at the next IDLE boundary.
     try:
         agent._sync_notifications()
+    except Exception:
+        pass
+
+    # Rescan live chat history for large unsummarized tool results that were
+    # already in context before this turn (e.g. after a refresh, notification
+    # dismissed, or history migration).  Uses skip_if_ref_id_exists so no
+    # duplicate notifications are published for results already tracked.
+    try:
+        agent._rescan_large_tool_results()
     except Exception:
         pass
 
@@ -940,7 +959,7 @@ def _handle_tc_wake(agent, msg: Message) -> None:
     message after ``_sync_notifications`` has already spliced a
     synthesized ``(ToolCallBlock, ToolResultBlock)`` pair into the
     canonical interface (impersonating a voluntary
-    ``system(action="notification")`` call from the agent's
+    ``notification(action="check")`` call from the agent's
     perspective).  This handler's job is to drive the next inference
     round off that wire — no fake user message, no meta prefix.  From
     the LLM's viewpoint it is indistinguishable from the agent having
@@ -993,7 +1012,9 @@ def _handle_tc_wake(agent, msg: Message) -> None:
         logger_fn=agent._log,
         meta_fn=lambda: build_meta(agent),
         working_dir=agent._working_dir,
-        tool_call_guard=getattr(agent, "_tool_call_guard", None),
+        summarize_notification_threshold=getattr(
+            agent, "_summarize_notification_threshold", None
+        ),
     )
 
     # Legacy tc_inbox path — drained items get spliced and driven the
@@ -1085,6 +1106,11 @@ def _handle_tc_wake(agent, msg: Message) -> None:
         # _handle_request; delivery happens at the next IDLE boundary.
         try:
             agent._sync_notifications()
+        except Exception:
+            pass
+        # Rescan for large unsummarized results in chat history.
+        try:
+            agent._rescan_large_tool_results()
         except Exception:
             pass
     except Exception as e:
@@ -1381,11 +1407,68 @@ def _process_response(agent, response, *, ledger_source: str = "main") -> dict:
                 from ..meta_block import skeletonize_notification_holder
                 skeletonize_notification_holder(agent)
         else:
+            _prior_holder = agent._notification_live_holder
             agent._notification_live_holder = attach_active_notifications(
                 agent,
                 tool_results,
-                prior_holder=agent._notification_live_holder,
+                prior_holder=_prior_holder,
             )
+
+        # Move the live `_meta.agent_meta` / `_meta.guidance` blocks (kernel
+        # runtime state + guidance) to the latest tool-result dict from this
+        # batch, stripping them from the prior holder.  This keeps them
+        # latest-only — only the freshest provider-visible result carries live
+        # agent state, so stale snapshots do not accumulate in history.  Mirrors
+        # the notification holder above.  Unlike notifications there is no
+        # molt-race special case: these are pure per-turn snapshots, not
+        # kernel-synchronized channel state.
+        #
+        # MUST run before _log_notification_block_injected below: the durable
+        # snapshot copies the holder's full ``_meta`` envelope, and
+        # ``attach_active_runtime`` is what populates ``_meta.agent_meta`` /
+        # ``_meta.guidance`` on that holder.  Logging before this ran would
+        # persist rows missing those two blocks.
+        try:
+            agent._runtime_live_holder = attach_active_runtime(
+                agent,
+                tool_results,
+                prior_holder=getattr(agent, "_runtime_live_holder", None),
+            )
+        except Exception:
+            agent._log(
+                "runtime_block_attach_failed",
+                reason="attach_active_runtime raised",
+            )
+
+        # Log the actual canonical ``_meta`` envelope that was stamped onto the
+        # tool result so the TUI /notification command can show real snapshots.
+        # Only log when a genuinely new notification holder was established
+        # (changed and not None), i.e. when notification stamping actually
+        # happened this batch.  Runs after attach_active_runtime so the persisted
+        # ``_meta`` carries the full envelope (tool_meta/agent_meta/guidance/
+        # notifications/notification_guidance).
+        if not _batch_includes_context_molt(response.tool_calls):
+            _new_holder = agent._notification_live_holder
+            _new_meta = _new_holder.get("_meta") if isinstance(_new_holder, dict) else None
+            if (
+                _new_holder is not None
+                and _new_holder is not _prior_holder
+                and isinstance(_new_meta, dict)
+                and "notifications" in _new_meta
+            ):
+                try:
+                    _carrier_call_id = ""
+                    for _result in tool_results:
+                        if getattr(_result, "content", None) is _new_holder:
+                            _carrier_call_id = str(getattr(_result, "id", "") or "")
+                            break
+                    agent._log_notification_block_injected(
+                        _new_meta,
+                        mode="active_tool_result",
+                        call_id=_carrier_call_id,
+                    )
+                except Exception:
+                    pass
 
         if intercepted:
             if tool_results and agent._chat:
@@ -1464,6 +1547,15 @@ def _process_response(agent, response, *, ledger_source: str = "main") -> dict:
         # _handle_request; delivery happens at the next IDLE boundary.
         try:
             agent._sync_notifications()
+        except Exception:
+            pass
+        # Keep summarize reminders in sync across tool-loop LLM rounds too.
+        # New tool results are handled by the executor hook, but old live
+        # results (or dismissed reminders for still-unsummarized results) must
+        # be rediscovered after each continuation round, not only at external
+        # request / notification-wake boundaries.
+        try:
+            agent._rescan_large_tool_results()
         except Exception:
             pass
 
