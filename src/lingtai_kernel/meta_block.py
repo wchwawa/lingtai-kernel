@@ -133,7 +133,9 @@ TOOL_RESULT_CHARS_TOP_N = 10
 TOOL_RESULT_CHARS_PREVIEW_LEN = 200
 TOOL_RESULT_CHARS_README = (
     "listing top 10 tool results by char count with a first-200-char preview; "
-    "consider summarize if deemed useless"
+    "no need to summarize this helper (it appears only on the latest tool "
+    "result _meta and older copies are stripped); use the listed result "
+    "ids/previews to decide which prior results need summarizing"
 )
 
 

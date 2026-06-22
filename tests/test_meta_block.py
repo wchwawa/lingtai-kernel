@@ -192,6 +192,23 @@ def test_current_tool_result_chars_readme_drops_top5_and_1000_wording():
     assert "top 5" not in readme
 
 
+def test_current_tool_result_chars_readme_says_no_need_to_summarize_helper():
+    agent = _agent_with_history([])
+
+    current = current_tool_result_chars(agent)
+
+    readme = current["_readme"]
+    # The helper metadata itself does not need summarizing: it only ever
+    # appears on the latest tool result _meta, older copies are stripped.
+    assert "no need to summarize this" in readme
+    assert "latest" in readme
+    # It must still point the agent at the listed results so it can decide
+    # which prior results actually need summarizing.
+    assert "summariz" in readme
+    assert "1000" not in readme
+    assert "top 5" not in readme
+
+
 def test_build_meta_readme_mentions_tool_result_char_count_and_summarize():
     readme = build_meta_readme()
 
