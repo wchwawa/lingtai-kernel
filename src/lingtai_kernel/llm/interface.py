@@ -307,6 +307,9 @@ class ChatInterface:
         self._next_id: int = 0
         self._current_system_text: str | None = None
         self._current_tools: list[dict] | None = None
+        self.tool_result_recovery_lookup: Callable[
+            [ToolCallBlock], ToolResultBlock | None
+        ] | None = None
         # Deferred system update — stashed by add_system when the tail has a
         # pending tool_call, flushed by enforce_tool_pairing at the start of
         # the next send. Prevents an interleaved system entry from splitting
@@ -354,8 +357,9 @@ class ChatInterface:
         a turn that was emitted but whose tool_results never arrived (typically
         because the process crashed or the send raised mid-loop). The canonical
         repair for that case is ``close_pending_tool_calls(reason)``, which
+        first tries any installed real-result recovery lookup and otherwise
         synthesizes placeholder tool_results preserving the assistant turn and
-        the error context. Repairing it here would destroy that signal.
+        error context. Repairing it here would destroy that signal.
 
         Mutates entries in place.  Idempotent.
 
@@ -444,14 +448,22 @@ class ChatInterface:
         *,
         tool_completed: bool = False,
         tool_not_dispatched: bool = False,
+        tool_result_recovery_lookup: Callable[
+            [ToolCallBlock], ToolResultBlock | None
+        ] | None = None,
     ) -> None:
-        """Synthesize placeholder ToolResultBlocks for any unanswered tool_calls
-        on the tail assistant entry. No-op if the tail has no pending calls.
+        """Close unanswered tail tool_calls with real replays or placeholders.
+
+        For each pending call, an optional recovery lookup may provide a real
+        ``ToolResultBlock`` from durable execution state. If no real result is
+        available, the existing synthetic placeholder is used. No-op if the
+        tail has no pending calls.
 
         Used by recovery paths — AED retry, session restore from crashed
         process — to bring the interface into a valid state before appending
-        a new user entry. Each placeholder carries the reason string so the
-        model has context on the next turn.
+        a new user entry. Synthetic placeholders carry the reason string so the
+        model has context on the next turn; recovered real results keep their
+        original content and are marked ``synthesized=False``.
 
         When ``tool_completed`` is True, the caller knows the tool already
         executed successfully and the real failure was the LLM continuation
@@ -471,22 +483,39 @@ class ChatInterface:
             return
         last = self._entries[-1]
         pending = [b for b in last.content if isinstance(b, ToolCallBlock)]
-        placeholders = [
-            ToolResultBlock(
-                id=b.id,
-                name=b.name,
-                content=_synthesized_abort_message(
-                    b.name,
-                    reason,
-                    tool_completed=tool_completed,
-                    tool_not_dispatched=tool_not_dispatched,
-                    tool_call=b,
-                ),
-                synthesized=True,
+        lookup = tool_result_recovery_lookup or self.tool_result_recovery_lookup
+        results: list[ToolResultBlock] = []
+        for b in pending:
+            recovered: ToolResultBlock | None = None
+            if lookup is not None:
+                try:
+                    recovered = lookup(b)
+                except Exception:
+                    recovered = None
+            if (
+                recovered is not None
+                and isinstance(recovered, ToolResultBlock)
+                and recovered.id == b.id
+                and recovered.name == b.name
+            ):
+                recovered.synthesized = False
+                results.append(recovered)
+                continue
+            results.append(
+                ToolResultBlock(
+                    id=b.id,
+                    name=b.name,
+                    content=_synthesized_abort_message(
+                        b.name,
+                        reason,
+                        tool_completed=tool_completed,
+                        tool_not_dispatched=tool_not_dispatched,
+                        tool_call=b,
+                    ),
+                    synthesized=True,
+                )
             )
-            for b in pending
-        ]
-        self._append("user", placeholders)
+        self._append("user", results)
 
     # -- Add methods ----------------------------------------------------------
 

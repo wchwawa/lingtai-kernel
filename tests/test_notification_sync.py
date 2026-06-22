@@ -551,6 +551,52 @@ def _make_chat_stub():
     return _ChatStub()
 
 
+def _make_idle_agent_with_pending_tail(tmp_path: Path, *, call_id: str = "tc-pending"):
+    from lingtai_kernel.base_agent import BaseAgent
+    from lingtai_kernel.llm.interface import ToolCallBlock
+    from lingtai_kernel.state import AgentState
+
+    chat = _make_chat_stub()
+    chat.interface.add_assistant_message(
+        [ToolCallBlock(id=call_id, name="bash", args={"command": "echo hi"})]
+    )
+
+    class _Agent(BaseAgent):
+        def __init__(self, workdir):
+            self._working_dir = workdir
+            self._state = AgentState.IDLE
+            self._notification_fp = ()
+            self._notification_deferred_log_fp = ()
+            self._notification_block_id = None
+            self._pending_notification_meta = None
+            self._chat_stub = chat
+            self._logs = []
+            self.agent_name = "stub"
+            import queue
+            self.inbox = queue.Queue()
+
+        @property
+        def _chat(self):
+            return self._chat_stub
+
+        def _save_chat_history(self, *, ledger_source="main"):
+            pass
+
+        def _log(self, evt, **fields):
+            self._logs.append((evt, fields))
+
+        def _wake_nap(self, *_a, **_kw):
+            pass
+
+        def _set_state(self, *_a, **_kw):
+            pass
+
+        def _reset_uptime(self):
+            pass
+
+    return _Agent(tmp_path)
+
+
 def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
     """IDLE: fingerprint change -> MSG_TC_WAKE goes to the inbox.
 
@@ -614,6 +660,70 @@ def test_sync_idle_posts_wake_message(tmp_path: Path) -> None:
     # _handle_tc_wake drives one inference round off the wire.
     msg = agent.inbox.get_nowait()
     assert msg.type == MSG_TC_WAKE
+
+
+def test_sync_idle_heal_replays_recorded_tool_result_before_notification(
+    tmp_path: Path,
+) -> None:
+    from lingtai_kernel.llm.interface import ToolResultBlock
+    from lingtai_kernel.message import MSG_TC_WAKE
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "tool_result",
+                "tool_call_id": "tc-pending",
+                "tool_name": "bash",
+                "tool_args": {"command": "echo should-not-be-relogged"},
+                "result": {"stdout": "already ran"},
+                "ts": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    agent = _make_idle_agent_with_pending_tail(tmp_path)
+    publish(tmp_path, "email", {"count": 1})
+
+    agent._sync_notifications()
+
+    entries = agent._chat_stub.interface.entries
+    assert len(entries) == 4
+    replayed = entries[1].content[0]
+    assert isinstance(replayed, ToolResultBlock)
+    assert replayed.id == "tc-pending"
+    assert replayed.name == "bash"
+    assert replayed.content == {"stdout": "already ran"}
+    assert replayed.synthesized is False
+    assert entries[2].role == "assistant"
+    assert entries[3].role == "user"
+    assert agent.inbox.get_nowait().type == MSG_TC_WAKE
+    assert any(evt == "tool_result_replayed_from_log" for evt, _ in agent._logs)
+    serialized_logs = json.dumps(agent._logs, default=str)
+    assert "already ran" not in serialized_logs
+    assert "should-not-be-relogged" not in serialized_logs
+
+
+def test_sync_idle_heal_falls_back_to_synthetic_when_no_recorded_result(
+    tmp_path: Path,
+) -> None:
+    from lingtai_kernel.llm.interface import ToolResultBlock
+
+    agent = _make_idle_agent_with_pending_tail(tmp_path)
+    publish(tmp_path, "email", {"count": 1})
+
+    agent._sync_notifications()
+
+    entries = agent._chat_stub.interface.entries
+    assert len(entries) == 4
+    healed = entries[1].content[0]
+    assert isinstance(healed, ToolResultBlock)
+    assert healed.id == "tc-pending"
+    assert healed.synthesized is True
+    assert "did not complete" in healed.content
+    assert any(evt == "tool_result_replay_miss" for evt, _ in agent._logs)
 
 
 def test_sync_idle_injects_post_molt_after_molt_batch_deferred_stamp(tmp_path: Path) -> None:

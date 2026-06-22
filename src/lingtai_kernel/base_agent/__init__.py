@@ -588,6 +588,7 @@ class BaseAgent:
             build_tool_schemas_fn=self._build_tool_schemas,
             logger_fn=self._log,
             build_system_batches_fn=self._build_system_prompt_batches,
+            tool_result_recovery_lookup_fn=self._recover_pending_tool_result,
         )
 
         # Boot the psyche intrinsic
@@ -1276,9 +1277,11 @@ class BaseAgent:
             self._notification_deferred_log_fp = ()
 
     def _heal_pending_tool_calls(self, *, reason: str) -> bool:
-        """Close any unanswered tool_calls on the wire with synthetic
-        error results so subsequent appends respect the alternation
-        invariant.
+        """Close unanswered tool_calls so subsequent appends respect pairing.
+
+        The close path first replays any matching durable real tool results
+        from ``logs/events.jsonl``; calls without recorded results still get the
+        existing synthetic error results.
 
         Used by the notification-sync wake path: if a previous turn
         exited mid-tool-sequence (AED-exhausted, kernel exception, etc.)
@@ -1303,6 +1306,10 @@ class BaseAgent:
         if self._chat is None:
             return False
         iface = self._chat.interface
+        try:
+            iface.tool_result_recovery_lookup = self._recover_pending_tool_result
+        except Exception:
+            pass
         if not iface.has_pending_tool_calls():
             return False
         try:
@@ -1316,6 +1323,16 @@ class BaseAgent:
         except Exception:
             pass
         return True
+
+    def _recover_pending_tool_result(self, tool_call):
+        from ..tool_result_recovery import recover_tool_result_block_from_events
+
+        return recover_tool_result_block_from_events(
+            self._working_dir,
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            logger_fn=self._log,
+        )
 
     def _inject_notification_pair(self, notifications: dict) -> bool:
         """Inject a synthetic (call, result) pair for IDLE / ASLEEP states.
