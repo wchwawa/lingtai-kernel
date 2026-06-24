@@ -297,3 +297,172 @@ def test_refresh_watcher_script_cleans_stale_duplicate_process(tmp_path):
     assert "signal.SIGTERM" in script
     assert "signal.SIGKILL" in script
     assert "refresh_watcher_stale_duplicate" in script
+
+
+# ---------------------------------------------------------------------------
+# Relaunch watcher secret redaction (T3)
+#
+# The watcher subprocess writes events.jsonl through its own inline `log()`,
+# bypassing CompositeLoggingService.redact_for_trajectory. Secret-shaped values
+# can reach those events via `stderr_tail` (subprocess stderr, e.g. a config
+# traceback echoing a token), `cmdline` (process command line), and `error`
+# strings. The generated script must redact string fields before persisting.
+#
+# All tokens below are FAKE, fixed-shape values used only to exercise the
+# redaction regexes — they are not, and never were, live credentials.
+# ---------------------------------------------------------------------------
+
+# Fake, structurally-valid-shaped credentials (not real secrets).
+_FAKE_TELEGRAM_TOKEN = "123456789:" + "A" * 35
+_FAKE_BEARER = "Bearer " + "a1b2c3" + "d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9.t0"
+_FAKE_OPENAI_KEY = "sk-" + "x" * 40
+_FAKE_ENV_ASSIGN = "BOT_TOKEN=" + "z" * 20
+
+
+def _extract_relaunch_script(agent):
+    with patch("subprocess.Popen") as mock_popen:
+        agent._perform_refresh()
+    assert mock_popen.called
+    args, _kwargs = mock_popen.call_args
+    return args[0][2]
+
+
+def test_refresh_watcher_script_embeds_redactor(tmp_path):
+    """The generated watcher script must wire in the kernel redactor at its
+    single events.jsonl write chokepoint so stderr/cmdline/error previews are
+    redacted before persistence — not left raw like CompositeLoggingService
+    avoids."""
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    script = _extract_relaunch_script(agent)
+    # The redactor is sourced from the kernel module (single source of truth)
+    # and applied to the whole event dict inside log() before the JSONL write.
+    # Use redact_for_trajectory (not just redact_text value-walking) for
+    # key-aware parity with normal trajectory logging.
+    assert "trace_redaction" in script
+    assert "redact_for_trajectory" in script
+    # The write chokepoint (json.dumps(entry)) must come after a redaction step.
+    assert "_redact_for_trajectory(entry)" in script
+    # Degradation must be diagnosable via a non-secret marker, not silent.
+    assert "redaction_unavailable" in script
+
+
+def test_refresh_watcher_log_redacts_secret_fields(tmp_path):
+    """Executing the generated log() with secret-shaped string fields must
+    write a redacted events.jsonl record. Uses fake tokens only."""
+    import json as _json
+    import re as _re
+
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    events_path = agent._working_dir / "logs" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    script = _extract_relaunch_script(agent)
+
+    # Slice the script prefix up to and including the log() definition, then
+    # run just that prefix plus an explicit log() call. This avoids executing
+    # the watcher's blocking relaunch loop while exercising the real write path.
+    marker = "deadline = time.time() + 60\n"
+    assert marker in script, "expected loop-start marker to slice the script"
+    prefix = script.split(marker, 1)[0]
+
+    fake_stderr_tail = (
+        "Traceback (most recent call last):\n"
+        f"  config error: telegram bot_token={_FAKE_TELEGRAM_TOKEN}\n"
+        f"  auth header: {_FAKE_BEARER}\n"
+        f"  openai: {_FAKE_OPENAI_KEY}\n"
+        f"  env: {_FAKE_ENV_ASSIGN}\n"
+    )
+    fake_cmdline = f"lingtai run {agent._working_dir} --token {_FAKE_OPENAI_KEY}"
+
+    call = (
+        "log('refresh_watcher_relaunch_dead', attempt=1, pid=4242, "
+        "stderr_tail=_TEST_STDERR[-500:])\n"
+        "log('refresh_watcher_stale_duplicate_terminate', attempt=1, pid=4242, "
+        "heartbeat_age=99.0, cmdline=_TEST_CMDLINE[-300:])\n"
+    )
+    ns = {"_TEST_STDERR": fake_stderr_tail, "_TEST_CMDLINE": fake_cmdline}
+    exec(compile(prefix + call, "<relaunch_script>", "exec"), ns)
+
+    raw = events_path.read_text(encoding="utf-8")
+    # No fake token shape may survive into the durable event log.
+    assert _FAKE_TELEGRAM_TOKEN not in raw
+    assert _FAKE_OPENAI_KEY not in raw
+    # The bearer credential body must be gone (the literal word "Bearer" may
+    # remain as part of the redaction placeholder).
+    assert "d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9" not in raw
+    assert "REDACTED" in raw
+
+    # The records are still valid JSON with their type/metadata intact.
+    records = [_json.loads(line) for line in raw.splitlines() if line.strip()]
+    types = {r["type"] for r in records}
+    assert "refresh_watcher_relaunch_dead" in types
+    assert "refresh_watcher_stale_duplicate_terminate" in types
+    dead = next(r for r in records if r["type"] == "refresh_watcher_relaunch_dead")
+    assert dead["attempt"] == 1
+    assert dead["pid"] == 4242
+    assert _re.search(r"REDACTED", dead["stderr_tail"])
+
+
+def test_refresh_watcher_log_redacts_secret_named_key_value(tmp_path):
+    """Whole-entry redact_for_trajectory must remove a value under a secret-named
+    key even when the value does not match any provider token shape — the
+    key-aware parity the value-walking redact_text path lacked. Uses a fake,
+    non-token-shaped password value only."""
+    import json as _json
+
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    events_path = agent._working_dir / "logs" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    script = _extract_relaunch_script(agent)
+    marker = "deadline = time.time() + 60\n"
+    assert marker in script
+    prefix = script.split(marker, 1)[0]
+
+    # A plausible app password: ordinary characters, no token prefix/shape, so
+    # redact_text alone would leave it raw. The secret-named key triggers
+    # key-aware redaction in redact_for_trajectory.
+    fake_app_password = "hunter2-correct-horse-battery"
+    call = (
+        "log('refresh_watcher_relaunch_error', attempt=1, "
+        "email_password=_TEST_PW)\n"
+    )
+    ns = {"_TEST_PW": fake_app_password}
+    exec(compile(prefix + call, "<relaunch_script>", "exec"), ns)
+
+    raw = events_path.read_text(encoding="utf-8")
+    assert fake_app_password not in raw
+    assert "REDACTED" in raw
+    records = [_json.loads(line) for line in raw.splitlines() if line.strip()]
+    record = next(r for r in records if r["type"] == "refresh_watcher_relaunch_error")
+    assert record["email_password"] == "<REDACTED:secret>"
+
+
+def test_refresh_watcher_log_marks_redaction_unavailable_on_import_failure(tmp_path):
+    """If the kernel redactor cannot be imported, the watcher must fail open to
+    keep relaunch reliable, but stamp a non-secret `redaction_unavailable=True`
+    marker so the security degradation is diagnosable rather than silent."""
+    import json as _json
+
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    events_path = agent._working_dir / "logs" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    script = _extract_relaunch_script(agent)
+    marker = "deadline = time.time() + 60\n"
+    assert marker in script
+    prefix = script.split(marker, 1)[0]
+
+    # Simulate the import failure path by forcing the fallback identity redactor
+    # and the import-failed flag, then logging a benign event.
+    call = (
+        "_REDACTOR_IMPORT_OK = False\n"
+        "log('refresh_watcher_relaunch', attempt=1)\n"
+    )
+    exec(compile(prefix + call, "<relaunch_script>", "exec"), {})
+
+    raw = events_path.read_text(encoding="utf-8")
+    records = [_json.loads(line) for line in raw.splitlines() if line.strip()]
+    record = next(r for r in records if r["type"] == "refresh_watcher_relaunch")
+    assert record["attempt"] == 1
+    assert record["redaction_unavailable"] is True
