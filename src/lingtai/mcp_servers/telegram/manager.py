@@ -24,7 +24,6 @@ from uuid import uuid4
 
 import logging
 import threading
-import time
 
 if TYPE_CHECKING:
     from .service import TelegramService
@@ -169,15 +168,15 @@ SCHEMA = {
                 "accounts",
             ],
             "description": (
-                "send: send message to a chat (chat_id, text; optional media, reply_markup, placeholder, chat_action). "
+                "send: send message to a chat (chat_id, text; optional media, reply_markup, placeholder, chat_action, parse_mode/entities). "
                 "If chat_action is set and no text/media is provided, sends a typing "
                 "indicator (auto-expires after 5s) instead of a message. "
                 "check: list recent conversations with unread counts (optional account). "
                 "read: read messages from a chat (chat_id; optional limit). "
-                "reply: reply to a specific message (message_id from read results, text). "
+                "reply: reply to a specific message (message_id from read results, text; optional parse_mode/entities). "
                 "search: search messages (query; optional account, chat_id). "
                 "delete: delete a bot message (message_id). "
-                "edit: edit a bot message (message_id, text; optional reply_markup). "
+                "edit: edit a bot message (message_id, text; optional reply_markup, parse_mode/entities). "
                 "contacts: list saved contacts. "
                 "add_contact: save a chat alias (chat_id, alias); this does not grant inbound permission. "
                 "To receive messages from that user, their Telegram user ID must also be in allowed_users. "
@@ -212,6 +211,27 @@ SCHEMA = {
         "reply_markup": {
             "type": "object",
             "description": "Inline keyboard markup",
+        },
+        "parse_mode": {
+            "type": "string",
+            "enum": ["HTML", "MarkdownV2", "Markdown"],
+            "description": "Telegram Bot API parse_mode for rich text (send/reply/edit, and media captions).",
+        },
+        "entities": {
+            "type": "array",
+            "description": "Telegram MessageEntity[] for message text formatting (send/reply/edit).",
+        },
+        "caption_entities": {
+            "type": "array",
+            "description": "Telegram MessageEntity[] for media captions.",
+        },
+        "link_preview_options": {
+            "type": "object",
+            "description": "Telegram LinkPreviewOptions for text messages.",
+        },
+        "disable_web_page_preview": {
+            "type": "boolean",
+            "description": "Compatibility shortcut to disable link previews for text messages.",
         },
         "placeholder": {
             "type": "boolean",
@@ -259,7 +279,7 @@ DESCRIPTION = (
     "do not attempt to configure or reconfigure this MCP — your orchestrator "
     "manages it, and if the network needs this MCP to reach you the wiring "
     "is propagated to your session automatically. "
-    "Use 'send' for outgoing messages (text, photos, documents, inline keyboards). "
+    "Use 'send' for outgoing messages (text, photos, documents, inline keyboards, rich formatting). "
     "'check' to see recent conversations. "
     "'read' to read messages from a specific chat. "
     "'reply' to respond to a message (use compound ID from read results). "
@@ -908,6 +928,48 @@ class TelegramManager:
     # Actions
     # ------------------------------------------------------------------
 
+    _PARSE_MODES = {"HTML", "MarkdownV2", "Markdown"}
+
+    def _rich_text_options(self, args: dict) -> tuple[dict[str, Any], str | None]:
+        """Extract Bot API rich text options for text messages from tool args.
+
+        Returns (options, error). When nothing relevant is supplied the
+        options dict is empty, so existing plain-text callers behave exactly
+        as before.
+        """
+        opts: dict[str, Any] = {}
+        parse_mode = args.get("parse_mode")
+        if parse_mode is not None:
+            if parse_mode not in self._PARSE_MODES:
+                return {}, "parse_mode must be one of: HTML, MarkdownV2, Markdown"
+            opts["parse_mode"] = parse_mode
+        if args.get("entities") is not None:
+            opts["entities"] = args.get("entities")
+        if args.get("link_preview_options") is not None:
+            opts["link_preview_options"] = args.get("link_preview_options")
+        if args.get("disable_web_page_preview") is not None:
+            opts["disable_web_page_preview"] = bool(args.get("disable_web_page_preview"))
+        return opts, None
+
+    def _caption_options(self, args: dict) -> tuple[dict[str, Any], str | None]:
+        """Extract Bot API rich caption options for media sends from tool args.
+
+        If ``caption_entities`` is omitted but ``entities`` is supplied, the
+        latter is treated as caption entities for convenience.
+        """
+        opts: dict[str, Any] = {}
+        parse_mode = args.get("parse_mode")
+        if parse_mode is not None:
+            if parse_mode not in self._PARSE_MODES:
+                return {}, "parse_mode must be one of: HTML, MarkdownV2, Markdown"
+            opts["parse_mode"] = parse_mode
+        caption_entities = args.get("caption_entities")
+        if caption_entities is None:
+            caption_entities = args.get("entities")
+        if caption_entities is not None:
+            opts["caption_entities"] = caption_entities
+        return opts, None
+
     def _send(self, args: dict) -> dict:
         account = self._resolve_account(args)
         chat_id = args.get("chat_id")
@@ -922,6 +984,10 @@ class TelegramManager:
         reply_markup = args.get("reply_markup")
         chat_action = args.get("chat_action")
         placeholder = bool(args.get("placeholder", False))
+        rich_text_options, rich_text_error = self._rich_text_options(args)
+        caption_options, caption_error = self._caption_options(args)
+        if rich_text_error or caption_error:
+            return {"error": rich_text_error or caption_error}
 
         if not chat_id:
             return {"error": "chat_id is required"}
@@ -980,11 +1046,13 @@ class TelegramManager:
                 result = acct.send_photo(
                     chat_id, media_path, caption=text or None,
                     reply_to_message_id=reply_to,
+                    **caption_options,
                 )
             elif media_type == "document":
                 result = acct.send_document(
                     chat_id, media_path, caption=text or None,
                     reply_to_message_id=reply_to,
+                    **caption_options,
                 )
             else:
                 return {"error": f"Unknown media type: {media_type}"}
@@ -992,6 +1060,7 @@ class TelegramManager:
             result = acct.send_message(
                 chat_id, text, reply_markup=reply_markup,
                 reply_to_message_id=reply_to,
+                **rich_text_options,
             )
 
         # Track for duplicate detection
@@ -1010,6 +1079,11 @@ class TelegramManager:
             "text": text,
             "media": media,
             "reply_markup": reply_markup,
+            "parse_mode": args.get("parse_mode"),
+            "entities": args.get("entities"),
+            "caption_entities": args.get("caption_entities"),
+            "link_preview_options": args.get("link_preview_options"),
+            "disable_web_page_preview": args.get("disable_web_page_preview"),
             "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "status": "placeholder" if placeholder else "sent",
         }
@@ -1145,6 +1219,11 @@ class TelegramManager:
             "text": text,
             "media": args.get("media"),
             "reply_markup": args.get("reply_markup"),
+            "parse_mode": args.get("parse_mode"),
+            "entities": args.get("entities"),
+            "caption_entities": args.get("caption_entities"),
+            "link_preview_options": args.get("link_preview_options"),
+            "disable_web_page_preview": args.get("disable_web_page_preview"),
             # We need to pass reply_to_message_id through
             "_reply_to_message_id": tg_msg_id,
         })
@@ -1199,6 +1278,10 @@ class TelegramManager:
             return {"error": "text is required"}
         account, chat_id, tg_msg_id = self._parse_compound_id(compound_id)
         reply_markup = args.get("reply_markup")
+        rich_text_options, rich_text_error = self._rich_text_options(args)
+        caption_options, caption_error = self._caption_options(args)
+        if rich_text_error or caption_error:
+            return {"error": rich_text_error or caption_error}
         acct = self._service.get_account(account)
 
         # Detect if original message had media (caption edit vs text edit)
@@ -1216,9 +1299,11 @@ class TelegramManager:
                     except (json.JSONDecodeError, OSError):
                         continue
 
+        edit_options = caption_options if is_caption else rich_text_options
         acct.edit_message(
             chat_id=chat_id, message_id=tg_msg_id, text=text,
             reply_markup=reply_markup, is_caption=is_caption,
+            **edit_options,
         )
         return {"status": "edited", "message_id": compound_id}
 
