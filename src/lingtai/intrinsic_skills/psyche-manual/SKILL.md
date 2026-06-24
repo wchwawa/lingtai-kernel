@@ -75,6 +75,8 @@ detail belongs in the child.
 
 **The sub-entry `<YYYY-MM-DD>-molt-<molt-count>-<slug>/KNOWLEDGE.md` is the substance** — write it as the molt-history record of the segment, *before* you molt. Use `assets/session-journal-entry-template.md` from this skill directory for the frontmatter (including the `molt_count` field **and the required `type: session-journal` marker**) and section layout. This sub-entry's path is what you pass to `psyche(context, molt, session_journal_path=...)`, and the kernel validates the marker before letting the molt proceed (see §6). It is a journal, not a transcript — capture, in roughly this shape:
 
+**YAML frontmatter safety:** `name` and `description` are real YAML, not free-form text. Prefer the template's `description: >-` block scalar. If you write a one-line value containing a colon followed by a space (for example `description: Session record for codex molt 53: runtime relay`), YAML treats the second colon as a mapping separator and the molt gate rejects the file. Quote the value or use the block scalar, then retry the same `psyche(context, molt, session_journal_path=...)` call.
+
 - **What the segment was about** — the original ask, the framing
 - **Accomplishments** — what you completed/moved forward, the outputs, who was told and where
 - **Decisions and their reasoning** — the *why*, especially where an alternative was rejected

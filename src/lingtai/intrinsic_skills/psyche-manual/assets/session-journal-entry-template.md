@@ -28,10 +28,17 @@ rather than omitting one.
 > YAML frontmatter with `name` and `description`. You pass this file's path to
 > `psyche(context, molt, session_journal_path=...)`.
 
+> **YAML scalar safety:** keep `description` in the block-scalar form shown
+> below. Plain YAML values break when they contain a colon followed by a space
+> (for example `molt 53: runtime relay`), causing `mapping values are not
+> allowed here` during the molt gate.
+
 ```markdown
 ---
 name: <YYYY-MM-DD>-molt-<molt-count>-<slug>
-description: One-sentence hook — what this session segment did. Used in the parent index line.
+description: >-
+  One-sentence hook — what this session segment did. Use this block style so
+  colons such as "molt 53: runtime relay" remain valid YAML.
 date: <YYYY-MM-DD>
 molt_count: <current molt count, before calling psyche(context, molt)>
 type: session-journal
