@@ -164,6 +164,30 @@ def test_validate_invalid_yaml_rejects(tmp_path):
     assert "yaml" in err.lower() or "frontmatter" in err.lower()
 
 
+def test_validate_colon_description_error_mentions_yaml_scalar_fix(tmp_path):
+    bad = """---
+name: Broken
+description: Session record for codex molt 53: runtime relay handling
+type: session-journal
+---
+""".strip()
+    _write_journal(
+        tmp_path,
+        "knowledge/session-journal/2026-06-19-molt-1-x/KNOWLEDGE.md",
+        content=bad,
+    )
+
+    ok, err, resolved = validate_session_journal_path(
+        tmp_path, "knowledge/session-journal/2026-06-19-molt-1-x/KNOWLEDGE.md"
+    )
+
+    assert ok is False
+    assert err is not None
+    assert "invalid YAML frontmatter" in err
+    assert "description: >-" in err
+    assert resolved is None
+
+
 def test_validate_no_marker_rejects(tmp_path):
     # Valid frontmatter with name+description but NO session-journal marker.
     no_marker = (

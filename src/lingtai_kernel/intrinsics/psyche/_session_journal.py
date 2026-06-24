@@ -45,7 +45,8 @@ _RECOVERY_HINT = (
     "knowledge/session-journal/<entry>/KNOWLEDGE.md "
     "(a per-segment sub-entry, NOT the parent index). "
     "It must exist, be non-empty UTF-8, have valid YAML frontmatter with "
-    "`name` and `description`, and identify itself as session knowledge via "
+    "`name` and `description` (quote values containing `: ` or use "
+    "`description: >-`), and identify itself as session knowledge via "
     "`type: session-journal` or `session_journal: true`."
 )
 
