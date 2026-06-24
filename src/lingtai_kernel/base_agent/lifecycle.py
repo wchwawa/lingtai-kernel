@@ -679,28 +679,32 @@ def _perform_refresh(
         # the in-process CompositeLoggingService.redact_for_trajectory. Secret-
         # shaped values reach these events via stderr_tail (relaunched-process
         # stderr, e.g. a config traceback echoing a token), cmdline, and error
-        # strings, so redact string fields here before persisting. The kernel
-        # redactor is the single source of truth; fail open to identity if it
-        # cannot be imported so the watcher never crashes over redaction.
+        # strings, so redact the whole event dict here before persisting. Use the
+        # kernel's redact_for_trajectory (not just redact_text value-walking) so
+        # the watcher gets the same key-aware redaction as normal trajectory
+        # logging: values under secret-named keys are removed even when they do
+        # not match a known token shape. The kernel redactor is the single source
+        # of truth; fail open to identity if it cannot be imported so the watcher
+        # never crashes over redaction, but record a non-secret marker so the
+        # degradation is diagnosable rather than silent.
         "try:\n"
-        "    from lingtai_kernel.trace_redaction import redact_text as _redact_text\n"
+        "    from lingtai_kernel.trace_redaction import redact_for_trajectory as _redact_for_trajectory\n"
+        "    _REDACTOR_IMPORT_OK = True\n"
         "except Exception:\n"
-        "    def _redact_text(s):\n"
-        "        return s\n"
-        "def _redact_entry(value):\n"
-        "    if isinstance(value, str):\n"
-        "        try:\n"
-        "            return _redact_text(value)\n"
-        "        except Exception:\n"
-        "            return value\n"
-        "    if isinstance(value, dict):\n"
-        "        return {k: _redact_entry(v) for k, v in value.items()}\n"
-        "    if isinstance(value, (list, tuple)):\n"
-        "        return [_redact_entry(v) for v in value]\n"
-        "    return value\n"
+        "    def _redact_for_trajectory(value):\n"
+        "        return value\n"
+        "    _REDACTOR_IMPORT_OK = False\n"
         "def log(typ, **kw):\n"
         "    entry = {'type': typ, 'address': addr, 'agent_name': name, 'ts': time.time(), **kw}\n"
-        "    entry = _redact_entry(entry)\n"
+        "    if not _REDACTOR_IMPORT_OK:\n"
+        "        entry['redaction_unavailable'] = True\n"
+        "    else:\n"
+        "        try:\n"
+        "            entry = _redact_for_trajectory(entry)\n"
+        "        except Exception:\n"
+        "            entry = {'type': typ, 'address': addr, 'agent_name': name,\n"
+        "                     'ts': entry.get('ts'), 'redaction_unavailable': True,\n"
+        "                     'redaction_error': True}\n"
         "    try:\n"
         "        with open(events, 'a') as f:\n"
         "            f.write(json.dumps(entry) + '\\n')\n"

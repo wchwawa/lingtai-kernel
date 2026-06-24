@@ -36,7 +36,7 @@
   <section class="card">
     <h2>Conclusion</h2>
     <p><strong>The refresh/relaunch watcher subprocess persisted its own events to <code>logs/events.jsonl</code> without redaction, so secret-shaped values could leak into the durable event log.</strong> This PR routes that watcher's inline writer through the existing kernel redactor so <code>stderr_tail</code>, <code>cmdline</code>, and <code>error</code> previews are scrubbed before persistence.</p>
-    <p><span class="pill">single write chokepoint</span><span class="pill">reuses trace_redaction</span><span class="pill">fail-open import</span><span class="pill">fake tokens in tests</span><span class="pill">complementary to PR #315</span></p>
+    <p><span class="pill">single write chokepoint</span><span class="pill">whole-entry redact_for_trajectory</span><span class="pill">key-aware parity</span><span class="pill">fail-open + diagnosable marker</span><span class="pill">fake tokens in tests</span><span class="pill">complementary to PR #315</span></p>
   </section>
 
   <section class="card">
@@ -59,31 +59,30 @@
 
   <section class="card">
     <h2>The fix</h2>
-    <p>The watcher's single write chokepoint is its inline <code>log()</code>. We add a redaction step there, mirroring <code>CompositeLoggingService.log</code>'s <code>redact_for_trajectory(event)</code>:</p>
+    <p>The watcher's single write chokepoint is its inline <code>log()</code>. We add a redaction step there that mirrors <code>CompositeLoggingService.log</code> exactly &mdash; applying the whole-entry <code>redact_for_trajectory(event)</code> rather than only value-walking with <code>redact_text</code>:</p>
     <pre>try:
-    from lingtai_kernel.trace_redaction import redact_text as _redact_text
+    from lingtai_kernel.trace_redaction import redact_for_trajectory as _redact_for_trajectory
+    _REDACTOR_IMPORT_OK = True
 except Exception:
-    def _redact_text(s):
-        return s
-def _redact_entry(value):
-    if isinstance(value, str):
-        try:
-            return _redact_text(value)
-        except Exception:
-            return value
-    if isinstance(value, dict):
-        return {k: _redact_entry(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_entry(v) for v in value]
-    return value
+    def _redact_for_trajectory(value):
+        return value
+    _REDACTOR_IMPORT_OK = False
 def log(typ, **kw):
     entry = {'type': typ, 'address': addr, 'agent_name': name, 'ts': time.time(), **kw}
-    entry = _redact_entry(entry)
+    if not _REDACTOR_IMPORT_OK:
+        entry['redaction_unavailable'] = True
+    else:
+        try:
+            entry = _redact_for_trajectory(entry)
+        except Exception:
+            entry = {'type': typ, 'address': addr, 'agent_name': name,
+                     'ts': entry.get('ts'), 'redaction_unavailable': True,
+                     'redaction_error': True}
     ...write json...</pre>
     <ul>
-      <li><strong>Single source of truth.</strong> The watcher imports the same <code>redact_text</code> the in-process path uses; it does not duplicate the regex set.</li>
-      <li><strong>Fail-open.</strong> If the import or a redaction call ever fails, <code>log()</code> degrades to identity rather than crashing the relaunch supervisor &mdash; redaction must never break recovery.</li>
-      <li><strong>Recursive over the whole entry.</strong> Every string field is scrubbed, so future fields are covered without revisiting each call site.</li>
+      <li><strong>Single source of truth.</strong> The watcher imports the same <code>redact_for_trajectory</code> the in-process path uses; it does not duplicate the regex set or its traversal.</li>
+      <li><strong>Key-aware parity.</strong> Because it is the whole-entry redactor, values under secret-named keys (e.g. <code>email_password</code>) are removed even when they do not match any provider token shape &mdash; the gap a value-only <code>redact_text</code> walk left open.</li>
+      <li><strong>Fail-open but not silent.</strong> Redaction never crashes the relaunch supervisor: if the import fails the event carries a non-secret <code>redaction_unavailable=True</code> marker; if the redactor raises at apply time the event is rebuilt from only known-safe scalar fields (<code>type</code>/<code>address</code>/<code>agent_name</code>/<code>ts</code>) plus <code>redaction_unavailable=True</code>/<code>redaction_error=True</code> &mdash; the raw <code>**kw</code> fields are dropped, never persisted unredacted. Degradation is diagnosable from the durable log.</li>
     </ul>
   </section>
 
@@ -91,8 +90,10 @@ def log(typ, **kw):
     <h2>Tests <span class="ok">(all green)</span></h2>
     <p>Added to <code>tests/test_perform_refresh_handshake.py</code>. <strong>All token literals are fake, fixed-shape values</strong> used only to exercise the redaction regexes:</p>
     <ul>
-      <li><code>test_refresh_watcher_script_embeds_redactor</code> &mdash; the generated script wires in <code>trace_redaction</code>/<code>redact_text</code> at the write chokepoint.</li>
+      <li><code>test_refresh_watcher_script_embeds_redactor</code> &mdash; the generated script wires in <code>trace_redaction</code>/<code>redact_for_trajectory(entry)</code> at the write chokepoint and references the <code>redaction_unavailable</code> marker.</li>
       <li><code>test_refresh_watcher_log_redacts_secret_fields</code> &mdash; executing the generated <code>log()</code> with a fake-token-bearing <code>stderr_tail</code> and <code>cmdline</code> writes a record where no fake token survives and a <code>&lt;REDACTED:*&gt;</code> placeholder appears; records remain valid JSON with <code>type</code>/<code>attempt</code>/<code>pid</code> intact.</li>
+      <li><code>test_refresh_watcher_log_redacts_secret_named_key_value</code> &mdash; a fake, non-token-shaped password under a secret-named key (<code>email_password</code>) is reduced to <code>&lt;REDACTED:secret&gt;</code>, proving the whole-entry key-aware path.</li>
+      <li><code>test_refresh_watcher_log_marks_redaction_unavailable_on_import_failure</code> &mdash; the import-failure path stamps <code>redaction_unavailable=True</code> on the event instead of degrading silently.</li>
     </ul>
     <p class="muted">Fake shapes covered: Telegram bot token (<code>123456789:AAA…</code>), <code>Bearer …</code>, <code>sk-…</code> API key, and a keyed env assignment (<code>BOT_TOKEN=…</code>).</p>
   </section>

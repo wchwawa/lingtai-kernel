@@ -335,11 +335,15 @@ def test_refresh_watcher_script_embeds_redactor(tmp_path):
     agent = _make_agent_with_launch_cmd(tmp_path)
     script = _extract_relaunch_script(agent)
     # The redactor is sourced from the kernel module (single source of truth)
-    # and applied inside log() before the JSONL write.
+    # and applied to the whole event dict inside log() before the JSONL write.
+    # Use redact_for_trajectory (not just redact_text value-walking) for
+    # key-aware parity with normal trajectory logging.
     assert "trace_redaction" in script
-    assert "redact_text" in script
+    assert "redact_for_trajectory" in script
     # The write chokepoint (json.dumps(entry)) must come after a redaction step.
-    assert "_redact_entry" in script or "redact_text" in script
+    assert "_redact_for_trajectory(entry)" in script
+    # Degradation must be diagnosable via a non-secret marker, not silent.
+    assert "redaction_unavailable" in script
 
 
 def test_refresh_watcher_log_redacts_secret_fields(tmp_path):
@@ -397,3 +401,68 @@ def test_refresh_watcher_log_redacts_secret_fields(tmp_path):
     assert dead["attempt"] == 1
     assert dead["pid"] == 4242
     assert _re.search(r"REDACTED", dead["stderr_tail"])
+
+
+def test_refresh_watcher_log_redacts_secret_named_key_value(tmp_path):
+    """Whole-entry redact_for_trajectory must remove a value under a secret-named
+    key even when the value does not match any provider token shape — the
+    key-aware parity the value-walking redact_text path lacked. Uses a fake,
+    non-token-shaped password value only."""
+    import json as _json
+
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    events_path = agent._working_dir / "logs" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    script = _extract_relaunch_script(agent)
+    marker = "deadline = time.time() + 60\n"
+    assert marker in script
+    prefix = script.split(marker, 1)[0]
+
+    # A plausible app password: ordinary characters, no token prefix/shape, so
+    # redact_text alone would leave it raw. The secret-named key triggers
+    # key-aware redaction in redact_for_trajectory.
+    fake_app_password = "hunter2-correct-horse-battery"
+    call = (
+        "log('refresh_watcher_relaunch_error', attempt=1, "
+        "email_password=_TEST_PW)\n"
+    )
+    ns = {"_TEST_PW": fake_app_password}
+    exec(compile(prefix + call, "<relaunch_script>", "exec"), ns)
+
+    raw = events_path.read_text(encoding="utf-8")
+    assert fake_app_password not in raw
+    assert "REDACTED" in raw
+    records = [_json.loads(line) for line in raw.splitlines() if line.strip()]
+    record = next(r for r in records if r["type"] == "refresh_watcher_relaunch_error")
+    assert record["email_password"] == "<REDACTED:secret>"
+
+
+def test_refresh_watcher_log_marks_redaction_unavailable_on_import_failure(tmp_path):
+    """If the kernel redactor cannot be imported, the watcher must fail open to
+    keep relaunch reliable, but stamp a non-secret `redaction_unavailable=True`
+    marker so the security degradation is diagnosable rather than silent."""
+    import json as _json
+
+    agent = _make_agent_with_launch_cmd(tmp_path)
+    events_path = agent._working_dir / "logs" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    script = _extract_relaunch_script(agent)
+    marker = "deadline = time.time() + 60\n"
+    assert marker in script
+    prefix = script.split(marker, 1)[0]
+
+    # Simulate the import failure path by forcing the fallback identity redactor
+    # and the import-failed flag, then logging a benign event.
+    call = (
+        "_REDACTOR_IMPORT_OK = False\n"
+        "log('refresh_watcher_relaunch', attempt=1)\n"
+    )
+    exec(compile(prefix + call, "<relaunch_script>", "exec"), {})
+
+    raw = events_path.read_text(encoding="utf-8")
+    records = [_json.loads(line) for line in raw.splitlines() if line.strip()]
+    record = next(r for r in records if r["type"] == "refresh_watcher_relaunch")
+    assert record["attempt"] == 1
+    assert record["redaction_unavailable"] is True
