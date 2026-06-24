@@ -232,7 +232,9 @@ IDENTITY_SAFE_ACCOUNT_KEYS: tuple[str, ...] = (
     "bot_display_name",
     # feishu / lark
     "app_id",
-    # email-style addons
+    # email-style addons. These fields may identify a human/account and can
+    # surface in always-on prompt XML; keep them only when an addon identity
+    # writer intentionally publishes them for routing, never for authentication.
     "address",
     "email",
     # non-secret routing / size hints
