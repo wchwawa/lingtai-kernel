@@ -1475,7 +1475,7 @@ def test_on_emanation_done_failure_always_notifies(tmp_path):
     assert "[daemon:em-" not in events[0]["body"]
 
 
-def test_on_emanation_done_short_success_still_suppressed(tmp_path):
+def test_on_emanation_done_short_success_notifies(tmp_path):
     from lingtai_kernel.notifications import collect_notifications
 
     agent = _make_agent(tmp_path, ["daemon"])
@@ -1495,14 +1495,18 @@ def test_on_emanation_done_short_success_still_suppressed(tmp_path):
     mgr._on_emanation_done("em-short", "test task", future)
 
     assert agent.inbox.empty()
-    assert collect_notifications(agent._working_dir) == {}
+    events = collect_notifications(agent._working_dir)["system"]["data"]["events"]
+    assert len(events) == 1
+    assert events[0]["source"] == "daemon"
+    assert events[0]["ref_id"] == "em-short"
+    assert "Daemon em-short done." in events[0]["body"]
+    assert "Preview:\nok" in events[0]["body"]
 
 
 def test_on_emanation_done_cancelled_notifies_despite_short_text(tmp_path):
     """A cancelled run returns the short ``[cancelled]`` sentinel but its
-    run_dir state is authoritative. The short-result suppression must NOT
-    swallow a non-success terminal state — the parent must always learn the
-    daemon terminated."""
+    run_dir state is authoritative. The parent must always learn the daemon
+    terminated, with the correct terminal label."""
     from lingtai_kernel.notifications import collect_notifications
 
     agent = _make_agent(tmp_path, ["daemon"])

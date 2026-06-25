@@ -575,9 +575,11 @@ def _classify_terminal_state(
     future raises, ``_on_emanation_done`` sets ``status="failed"`` directly and
     does not call this helper.
 
-    The sole purpose is to keep a non-normal terminal state (timeout / cancelled
-    / failed) from being misread as a tiny ``"done"`` and silently swallowed by
-    the ``suppressed_short`` gate. Only a genuine ``"done"`` may be suppressed.
+    The sole purpose is to preserve the true terminal state (timeout /
+    cancelled / failed / done) before publishing the parent-facing daemon
+    notification. Every terminal state, including a short successful
+    ``"done"`` result, is now surfaced so the parent can safely go idle after
+    dispatch and wake when the run ends.
 
     Priority order (first match wins):
 
@@ -593,7 +595,7 @@ def _classify_terminal_state(
       P5  elapsed >= fraction * timeout_s with a ``[no output]`` body — a
           deliberately low-priority heuristic for the rare case where neither
           the recorded state nor the events survived.
-      P6  ``"done"`` — genuine success (suppression-eligible).
+      P6  ``"done"`` — genuine success.
     """
     run_dir = entry.get("run_dir") if entry else None
 
@@ -645,10 +647,11 @@ def _classify_terminal_state(
 class DaemonManager:
     """Manages subagent (emanation) lifecycle."""
 
-    # Minimum text length to trigger a parent notification for a *successful*
-    # (done) run — short happy-path results are suppressed to avoid notification
-    # storms. Non-success terminal states (failed / cancelled / timeout) always
-    # notify regardless of length; see _on_emanation_done.
+    # Historical constructor default for ``notify_threshold``. Terminal daemon
+    # completions are no longer suppressed by result length: the compact system
+    # notification is the parent wake signal for every terminal state. The
+    # constructor argument remains accepted for compatibility with existing
+    # callers/configs.
     _NOTIFY_MIN_LEN = 20
 
     def __init__(self, agent: "Agent", max_emanations: int = 100,
@@ -5318,9 +5321,9 @@ class DaemonManager:
         # recorded ``run_dir`` state authoritative (current main's behaviour) and
         # layers timeout_event / cancel_event / sentinel / elapsed fallbacks on
         # top, so a non-normal terminal state (timeout / cancelled / failed) is
-        # never misclassified as a tiny ``done`` and swallowed by the short-
-        # result gate below. The parent always learns the daemon terminated even
-        # when it failed silently. A raised future is ``failed`` unconditionally.
+        # never misclassified as a tiny ``done``. The parent always learns the
+        # daemon terminated, and with the correct terminal label, even when it
+        # failed silently. A raised future is ``failed`` unconditionally.
         if future_succeeded:
             status = _classify_terminal_state(entry, future_succeeded, text, timeout_s)
         else:
@@ -5333,15 +5336,9 @@ class DaemonManager:
             self._log("daemon_error", em_id=em_id,
                       exception=type(exc).__name__, exception_message=str(exc))
 
-        # Suppress notifications only for short *successful* results to prevent
-        # notification storms. Every non-success terminal state (failed,
-        # cancelled, timeout) always notifies so the parent can safely go idle
-        # after dispatch and still learn the run ended.
-        if status == "done" and len(text) < self._notify_threshold:
-            self._log("daemon_result", em_id=em_id, status="suppressed_short",
-                      text_length=len(text))
-            return
-
+        # Deliver every terminal state, including short successful results: the
+        # compact system notification is the wake signal that lets the parent
+        # safely go idle after dispatch and still learn the run ended.
         # Deliver exactly once per run: the done-callback can fire more than
         # once for the same em_id (racing reclaim, re-entrant callbacks). The
         # run directory owns the once-only claim, decoupled from the system
