@@ -82,7 +82,7 @@ daemon/__init__.py
   ├── _kill_cli_group()/_drain_all_cli_procs() — kill one batch's CLI procs (watchdog) vs. drain all for reclaim/stop
   ├── _arm_batch_done_cancel()      — sets a batch's cancel_event once all its futures finish so the watchdog can't wake later
   ├── _watchdog()                   — per-batch timeout enforcement thread; on timeout kills only its own `cli_group_id` procs
-  ├── _on_emanation_done()          — future done-callback: derives the terminal status from `run_dir.state_snapshot()["state"]` (authoritative: done/failed/cancelled/timeout), suppresses only short *successful* results, and publishes the once-only terminal notification (gated by `run_dir.claim_terminal_notification()`). This is the single funnel that guarantees every terminal outcome wakes the parent.
+  ├── _on_emanation_done()          — future done-callback: derives the terminal status from `run_dir.state_snapshot()["state"]` (authoritative: done/failed/cancelled/timeout) and publishes the once-only terminal notification for every terminal state, including short successful results (gated by `run_dir.claim_terminal_notification()`). This is the single funnel that guarantees every terminal outcome wakes the parent.
   ├── _publish_daemon_notification() — publishes one compact `.notification/system.json` event (id, terminal status, task summary, run dir, result/error path, bounded preview); used by both the terminal funnel and follow-up (`ask`) completions
   └── _drain_followup()             — drains per-emanation follow-up buffer (lingtai backend only)
 
