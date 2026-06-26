@@ -980,21 +980,7 @@ def _handle_request(agent, msg: Message) -> None:
         dup_free_passes=dup_free,
         dup_hard_block=dup_hard,
     )
-    agent._executor = ToolExecutor(
-        dispatch_fn=agent._dispatch_tool,
-        make_tool_result_fn=lambda name, result, **kw: agent.service.make_tool_result(
-            name, result, provider=agent._config.provider, **kw
-        ),
-        guard=guard,
-        known_tools=set(agent._intrinsics) | set(agent._tool_handlers),
-        parallel_safe_tools=agent._PARALLEL_SAFE_TOOLS,
-        logger_fn=agent._log,
-        meta_fn=lambda: build_meta(agent),
-        working_dir=agent._working_dir,
-        summarize_notification_threshold=getattr(
-            agent, "_summarize_notification_threshold", None
-        ),
-    )
+    agent._executor = _make_tool_executor(agent, guard)
     content = agent._pre_request(msg)
     # If a prior worker hang left an open recovery artifact, prepend one
     # concise recovery notice to this first safe request (once per artifact).
@@ -1078,23 +1064,12 @@ def _handle_tc_wake(agent, msg: Message) -> None:
         )
         return
 
-    agent._executor = ToolExecutor(
-        dispatch_fn=agent._dispatch_tool,
-        make_tool_result_fn=lambda name, result, **kw: agent.service.make_tool_result(
-            name, result, provider=agent._config.provider, **kw
-        ),
-        guard=LoopGuard(
+    agent._executor = _make_tool_executor(
+        agent,
+        LoopGuard(
             max_total_calls=_get_guard_limits(agent)[0],
             dup_free_passes=2,
             dup_hard_block=8,
-        ),
-        known_tools=set(agent._intrinsics) | set(agent._tool_handlers),
-        parallel_safe_tools=agent._PARALLEL_SAFE_TOOLS,
-        logger_fn=agent._log,
-        meta_fn=lambda: build_meta(agent),
-        working_dir=agent._working_dir,
-        summarize_notification_threshold=getattr(
-            agent, "_summarize_notification_threshold", None
         ),
     )
 
@@ -1241,6 +1216,32 @@ def _get_guard_limits(agent) -> tuple[int, int, int]:
     so stale init.json files cannot make the runtime harsher or looser.
     """
     return (ACTIVE_TURN_TOOL_CALL_EMERGENCY_LIMIT, 3, 8)
+
+
+def _make_tool_executor(agent, guard: LoopGuard) -> ToolExecutor:
+    """Construct the per-turn ``ToolExecutor`` with the shared wiring.
+
+    Every turn path wires the executor identically — dispatch fn, provider-aware
+    tool-result factory, known/parallel-safe tool sets, logger, meta fn, working
+    dir, and summarize threshold. Only the ``LoopGuard`` differs between paths
+    (e.g. ``dup_free_passes`` 3 for fresh requests vs 2 for tc-wake
+    continuations), so the caller supplies it.
+    """
+    return ToolExecutor(
+        dispatch_fn=agent._dispatch_tool,
+        make_tool_result_fn=lambda name, result, **kw: agent.service.make_tool_result(
+            name, result, provider=agent._config.provider, **kw
+        ),
+        guard=guard,
+        known_tools=set(agent._intrinsics) | set(agent._tool_handlers),
+        parallel_safe_tools=agent._PARALLEL_SAFE_TOOLS,
+        logger_fn=agent._log,
+        meta_fn=lambda: build_meta(agent),
+        working_dir=agent._working_dir,
+        summarize_notification_threshold=getattr(
+            agent, "_summarize_notification_threshold", None
+        ),
+    )
 
 
 def _check_external_send(agent, tool_calls, tool_results=None) -> None:
