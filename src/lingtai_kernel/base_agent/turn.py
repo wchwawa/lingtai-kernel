@@ -900,6 +900,36 @@ def _check_molt_pressure(agent) -> None:
 
     clear_notification(agent._working_dir, "molt")
 
+
+def _post_send_housekeeping(agent) -> None:
+    """Run the post-send housekeeping trio after an LLM round completes.
+
+    Called from every branch that finishes an LLM send (``_handle_request``,
+    the ``_handle_tc_wake`` continuation, and the ``_process_response`` tool
+    loop), always in this order:
+
+    1. ``_check_molt_pressure`` — clear the legacy pressure-warning channel.
+    2. ``_sync_notifications`` — record same-turn notification changes (while
+       ACTIVE this defers delivery to the next IDLE boundary).
+    3. ``_rescan_large_tool_results`` — rediscover large unsummarized tool
+       results already in chat history (e.g. after refresh / migration).
+
+    Steps 2 and 3 are best-effort and must never abort the turn, so each is
+    guarded independently. This deliberately excludes the standalone
+    IDLE-boundary notification check in ``_run_loop``, which has different
+    control flow and must not be folded in here.
+    """
+    _check_molt_pressure(agent)
+    try:
+        agent._sync_notifications()
+    except Exception:
+        pass
+    try:
+        agent._rescan_large_tool_results()
+    except Exception:
+        pass
+
+
 def _is_context_molt_call(tc) -> bool:
     """Return True when ``tc`` is ``psyche(context, molt, ...)``.
 
@@ -976,25 +1006,9 @@ def _handle_request(agent, msg: Message) -> None:
         pass
     meta = build_meta(agent)
 
-    # Molt pressure — warn agent when context is getting full.
-    _check_molt_pressure(agent)
-
-    # Synchronous notification sync — record same-turn notification
-    # changes.  While ACTIVE this deliberately defers without mutating
-    # unrelated tool results; delivery happens at the next IDLE boundary.
-    try:
-        agent._sync_notifications()
-    except Exception:
-        pass
-
-    # Rescan live chat history for large unsummarized tool results that were
-    # already in context before this turn (e.g. after a refresh, notification
-    # dismissed, or history migration).  Uses skip_if_ref_id_exists so no
-    # duplicate notifications are published for results already tracked.
-    try:
-        agent._rescan_large_tool_results()
-    except Exception:
-        pass
+    # Post-send housekeeping: molt pressure + notification sync + large-result
+    # rescan (see _post_send_housekeeping).
+    _post_send_housekeeping(agent)
 
     prefix = render_meta(agent, meta)
     if prefix:
@@ -1188,20 +1202,10 @@ def _handle_tc_wake(agent, msg: Message) -> None:
         agent._last_usage = response.usage
         agent._save_chat_history(ledger_source="tc_wake")
         _process_response(agent, response, ledger_source="tc_wake")
-        # Notification-driven turns should also check pressure so
-        # warnings fire even when the agent is woken by mail/soul.
-        _check_molt_pressure(agent)
-        # Synchronous notification sync — same ACTIVE deferral semantics as
-        # _handle_request; delivery happens at the next IDLE boundary.
-        try:
-            agent._sync_notifications()
-        except Exception:
-            pass
-        # Rescan for large unsummarized results in chat history.
-        try:
-            agent._rescan_large_tool_results()
-        except Exception:
-            pass
+        # Notification-driven turns also run post-send housekeeping so molt
+        # pressure / notification sync / large-result rescan fire even when the
+        # agent is woken by mail/soul (see _post_send_housekeeping).
+        _post_send_housekeeping(agent)
     except Exception as e:
         from ..llm_utils import WorkerStillRunningError
 
@@ -1643,26 +1647,13 @@ def _process_response(agent, response, *, ledger_source: str = "main") -> dict:
         agent._last_usage = response.usage
         agent._save_chat_history(ledger_source=ledger_source)
 
-        # Mid-loop legacy molt-notification sweep. Context pressure is now
-        # surfaced every tool result under _meta.agent_meta.context.molt
-        # (meta_block.build_meta), so this only clears any stale legacy
-        # molt.json left from older builds; it no longer publishes pressure.
-        _check_molt_pressure(agent)
-        # Synchronous notification sync — same ACTIVE deferral semantics as
-        # _handle_request; delivery happens at the next IDLE boundary.
-        try:
-            agent._sync_notifications()
-        except Exception:
-            pass
-        # Keep summarize reminders in sync across tool-loop LLM rounds too.
-        # New tool results are handled by the executor hook, but old live
-        # results (or dismissed reminders for still-unsummarized results) must
-        # be rediscovered after each continuation round, not only at external
-        # request / notification-wake boundaries.
-        try:
-            agent._rescan_large_tool_results()
-        except Exception:
-            pass
+        # Mid-loop post-send housekeeping. Context pressure is now surfaced
+        # every tool result under _meta.agent_meta.context.molt
+        # (meta_block.build_meta), so _check_molt_pressure here only clears any
+        # stale legacy molt.json; the rescan keeps summarize reminders in sync
+        # across tool-loop LLM rounds, not only at request/notification-wake
+        # boundaries (see _post_send_housekeeping).
+        _post_send_housekeeping(agent)
 
     final_text = "\n".join(collected_text_parts)
     has_errors = bool(collected_errors)
