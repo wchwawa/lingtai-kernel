@@ -67,6 +67,8 @@ daemons to keep the raw bulk out of main context; use summarize for the bulk tha
 already landed there. See `## 3. Use the right body` for the full daemon workflow
 methodology.
 
+### Delayed summarization reconstruction threshold
+
 Summarize takes effect locally at once (visible results replaced, large-result
 reminders cleared), but provider-side reconstruction is delayed and that delay is
 expected. Runtimes append onto a stable cache prefix instead of rebuilding it

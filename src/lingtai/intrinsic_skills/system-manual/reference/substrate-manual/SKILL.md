@@ -128,7 +128,9 @@ semantics, and the undismissable large-result reminders, read
 consumed a completed prior tool result and no longer need the raw text visible,
 replace its context-visible raw payload with a summary regardless of length. The
 summary preserves the conclusion, evidence, anchors, validation, risks, and next
-steps while lowering active context. Runtime high-attention guidance for this behavior is carried in `_meta.guidance`.
+steps while lowering active context. Runtime high-attention guidance for this
+behavior is carried in `_meta.guidance`, including the resident 0.75
+delayed-reconstruction rule.
 Treat guidance as a system-prompt-like appendix placed at the end of context: it
 is an ordered `sections[]` structure, not a loose metadata bag.  The kernel's
 `meta_readme` explanation of the `_meta` envelope is therefore one guidance

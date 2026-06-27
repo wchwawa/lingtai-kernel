@@ -94,7 +94,7 @@ Operational rules:
   clears the reminder.
 - If the result is still ambiguous, reopen or inspect it before summarizing.
 
-## 3a · Local effect now, reconstruction delayed
+## 3a · Delayed summarization: local effect now, reconstruction delayed
 
 Summarize has two layers of effect, and they are deliberately decoupled.
 
@@ -110,8 +110,9 @@ every summarize would throw away the cache/continuation benefit. So summarizing
 does not immediately force the provider to rebuild context:
 
 - **Below 0.75 of the context window:** the summarize stays "pending" at the
-  provider layer. The session keeps appending; you can keep working and may issue
-  more summarize calls safely. This delay is normal and is not a failure.
+  provider layer. The session keeps appending; you can keep working, batch
+  later summaries when practical, and follow any provider-specific cache guidance.
+  This delay is normal and is not a failure.
 - **At or above 0.75 of the context window:** if summarized history is
   pending, the runtime automatically reconstructs context with that compacted
   history on the next provider request. You do not need to call summarize again

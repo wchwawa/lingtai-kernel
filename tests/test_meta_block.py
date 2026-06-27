@@ -341,6 +341,9 @@ def test_build_meta_guidance_renders_guidance_meta_readme_and_adapter():
     assert isinstance(section, str) and section.strip()
     # Packaged guidance section body is present.
     assert "progressive disclosure" in section
+    assert "Delayed summarization reconstruction threshold" in section
+    assert "0.75" in section
+    assert "do not call `refresh` just to apply a summarize" in section
     # meta_readme content (the _meta envelope explanation) is present.
     assert "_meta envelope" in section or "_meta` envelope" in section
     assert "tool_meta" in section
@@ -1427,6 +1430,8 @@ def test_packaged_guidance_resource_is_valid():
     assert len(ids) == len(set(ids)), "section ids must be unique"
     titles = [s["title"] for s in guidance["sections"]]
     assert len(titles) == len(set(titles)), "section titles must be unique"
+    assert "summarize_reconstruction_threshold" in ids
+    assert "Delayed summarization reconstruction threshold" in titles
     body = "\n".join(section["body"] for section in guidance["sections"])
     assert "regardless of length" in body
     assert "token per API call" in body
@@ -1435,6 +1440,8 @@ def test_packaged_guidance_resource_is_valid():
     assert "mini molt for a consumed tool result" in body
     assert "stronger whole-conversation summarize boundary" in body
     assert "do not pay a separate summarize call" in body
+    assert "0.75" in body
+    assert "do not call `refresh` just to apply a summarize" in body
     assert "0.6 * context_window" in body
     assert "token_efficiency" in body
     assert "current_session" in body
