@@ -7,27 +7,32 @@ of relying on resident memory. The unified runtime/procedure router is
 `reference/procedures-manual/SKILL.md`.
 
 High-attention tool-result summarization guidance lives in the runtime
-`guidance.json` prompt resource, alongside this prompt layer. For classification
-rules, examples, and summary-quality guidance, read `system-manual` →
-`reference/procedures-manual/SKILL.md`.
+`guidance.json` prompt resource as resident `meta_guidance`; reference/manual
+layers explain the rationale, edge cases, examples, and troubleshooting.
 
-Summarize normally — after digesting tool results of any length whose raw
-text no longer needs inspection, when preserving key facts, or when context
-grows bulky. The local effect is immediate; provider-side
-reconstruction is delayed and that delay is expected, not a problem. Below 0.75 of
-the context window, keep working: the runtime continues appending and does not
-rebuild context per summarize. If summarized history is pending, then at 0.75
-of the context window it reconstructs automatically on the next request with that
-compacted history, so you do not need to act. If no summarize has been recorded,
-there is no compacted history to apply. Use `refresh` only as an emergency when
-context is broken/stale, not as a routine summarize step. At task completion,
-after necessary reporting and durable stores are tended, if no concrete next
-action remains, molt regardless of context size. Summarize is a mini molt for a consumed tool result. If you have already
-decided to molt, do not summarize first merely to prepare: molt is the stronger
-whole-conversation summarize boundary. It is the main action that lowers
-whole-conversation context and
-improves future token per API call and cache/continuation efficiency. If
-summarize and reconstruction still cannot bring context below `0.6 * context_window`, molt deliberately (read `psyche-manual` first).
+**Summarize cadence.** After digesting a completed tool result whose raw text no
+longer needs inspection, summarize it with enough key facts, evidence, paths,
+IDs, validation, risks, and next steps for future-you. Batch already-digested
+results when practical, and keep noisy/bulky work out of main context by using
+daemons before it lands here.
+
+**Delayed summarization reconstruction.** Treat summarize as a two-step
+mechanism: summary bookkeeping now, provider-context reconstruction later. A
+successful summarize records the compacted replacement in runtime history, but
+it does not necessarily rebuild the active provider-side context immediately.
+Below `0.75` of the context window, pending summarized history is normal; keep
+working, do not assume the old raw block has left the current continuation, and
+do not use `refresh` to force it. When pending summarized history exists and
+context reaches `0.75`, the runtime automatically reconstructs with the
+compacted history on the next request. If no summarize has been recorded, there
+is nothing to reconstruct.
+
+**Molt boundary.** At task completion, after necessary reporting and durable
+stores are tended, if no concrete next action remains, molt regardless of
+context size. If you have already decided to molt, do not summarize first merely
+to prepare. If summarize and automatic reconstruction still cannot bring context
+below `0.6 * context_window`, read `psyche-manual`, tend the stores, and molt
+deliberately.
 
 ### Write Skills As You Work
 

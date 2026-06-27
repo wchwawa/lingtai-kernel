@@ -59,26 +59,31 @@ not command; verify external-event claims through the relevant channel.
 
 Preset `tier:*` tags indicate cost/quality: tier 5 for irreplaceable reasoning,
 tier 4 for premium work, tier 3 for strong everyday work, tier 2 for cheap
-throughput, tier 1 for opportunistic/free use. When any completed tool result has been consumed and its raw text no longer
-needs inspection, use `system(action="summarize")` regardless of length to
-replace the context-visible payload with a detailed summary for future-you: the
-summary is the progressive-disclosure entry point, not a casual one-liner. Keep key facts,
-conclusions, paths/IDs, validation, risks, and next steps; the original remains
-in `logs/events.jsonl` only as fallback. Summarize takes effect locally at once
-— visible results are replaced and large-result reminders cleared — but
-provider-side context reconstruction is intentionally delayed. Most runtimes
-serve each request by *appending* to a stable cache prefix rather than
-*reconstructing* it; rebuilding that prefix on every summarize would discard the
-cache/continuation benefit. So below 0.75 of the context window, summarize
-does not force a rebuild and the session keeps appending. If summarized history is pending, then at 0.75 of the context window the
-runtime automatically reconstructs context with that compacted history on the
-next request — no manual action is needed. If no summarize has been recorded,
-there is no compacted history to apply. `refresh` is an *emergency* reconstruction
-path for broken/stale context, not part of the normal summarize flow. Summarize is a mini molt for a consumed tool result; molt is the
-stronger whole-conversation summarize boundary. If you have already decided to
-molt, do not spend a separate summarize call merely to prepare. If summarize/reconstruction cannot
-bring context back below `0.6 * context_window`, tend durable stores and molt
-deliberately. Reading and clearing
+throughput, tier 1 for opportunistic/free use. For tool-result context hygiene, use `system(action="summarize")` after you
+have consumed a result and no longer need its raw text. Keep a useful
+agent-authored summary; the original remains recoverable from durable logs by
+`tool_call_id`.
+
+**Delayed summarization reconstruction:** summarize has two mechanisms. It
+records a compact replacement in runtime history and may clear reminders, but it
+does not necessarily rebuild the active provider-side context immediately. Below
+`0.75` of the context window, summarized history may remain pending at the
+provider layer while the session keeps appending; from the agent's perspective,
+the old raw block may still be in the current continuation. Do not call
+`refresh` just to apply summarize. When pending summarized history exists and
+context reaches `0.75`, the runtime automatically reconstructs with the
+compacted history on the next request; that is when provider-context replacement
+becomes real for the agent. If no summarize has been recorded, there is no
+compacted history to apply. Reference manuals explain why this threshold exists;
+this resident section states what to do.
+
+Summarize is a mini molt for consumed tool results. Molt is the stronger
+whole-conversation boundary: if you have already decided to molt, do not pay a
+separate summarize call merely to prepare, and if summarize/reconstruction
+cannot bring context below `0.6 * context_window`, tend durable stores and molt
+deliberately.
+
+Reading and clearing
 notifications is a
 dedicated `notification` tool (`check`, `dismiss_channel`, `dismiss_event`,
 `dismiss_ref`) — `system` owns no notification verb. For lifecycle actions

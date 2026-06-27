@@ -16,7 +16,7 @@ STATIC_CODEX_COMMENT = {
         "request-side continuation/cache epochs, but summarize/reconstruction "
         "timing is the generic runtime behavior documented in "
         "substrate/procedures, not a Codex-only policy. Summary content is "
-        "recorded and applied locally now; provider-side context reconstruction "
+        "recorded in runtime history now; provider-side context reconstruction "
         "may be delayed until context reaches 0.75 of the window. Below "
         "the threshold, keep working normally. At or above the threshold, the "
         "runtime automatically reconstructs context on the next request with "
@@ -52,6 +52,9 @@ def test_agent_prompt_builder_refreshes_meta_guidance_adapter_rules(tmp_path):
     prompt = agent._build_system_prompt()
 
     assert "## meta_guidance" in prompt
+    assert "Delayed summarization reconstruction threshold" in prompt
+    assert "Do not call `refresh` just to apply a summarize" in prompt
+    assert "does not mean the active provider-side context" in prompt
     assert "### codex runtime rules" in prompt
     assert "responses_rest_epoch_reset" in prompt
     assert "Summarize normally when useful" in prompt
@@ -82,6 +85,9 @@ def test_agent_batched_prompt_builder_refreshes_meta_guidance_adapter_rules(tmp_
     prompt = "\n".join(agent._build_system_prompt_batches())
 
     assert "## meta_guidance" in prompt
+    assert "Delayed summarization reconstruction threshold" in prompt
+    assert "Do not call `refresh` just to apply a summarize" in prompt
+    assert "does not mean the active provider-side context" in prompt
     assert "### codex runtime rules" in prompt
     assert "responses_rest_epoch_reset" in prompt
     assert "Codex Responses sessions may keep" in prompt
