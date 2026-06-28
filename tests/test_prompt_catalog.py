@@ -34,6 +34,22 @@ from lingtai_kernel.prompt_catalog import (
 _FILE_PATH_IN_BACKTICKS = re.compile(r"`([^`\n]+)`")
 _RELATED_FILE_ITEM = re.compile(r"-\s*[\"\']?([^\"\']+?)[\"\']?(?=\s+-|$)")
 
+_PROMPT_SOURCE = "src/lingtai/prompts"
+_PRINCIPLE_SOURCE = f"{_PROMPT_SOURCE}/principle.md"
+_SUBSTRATE_SOURCE = f"{_PROMPT_SOURCE}/substrate.md"
+_PROCEDURES_SOURCE = f"{_PROMPT_SOURCE}/procedures.md"
+_GUIDANCE_INDEX_SOURCE = f"{_PROMPT_SOURCE}/guidance/INDEX.md"
+_GUIDANCE_SECTION_SOURCES = [
+    f"{_PROMPT_SOURCE}/guidance/{sid}.md" for sid in GUIDANCE_SECTION_ORDER
+]
+_PROMPT_SOURCE_GRAPH = {
+    _PRINCIPLE_SOURCE,
+    _SUBSTRATE_SOURCE,
+    _PROCEDURES_SOURCE,
+    _GUIDANCE_INDEX_SOURCE,
+    *_GUIDANCE_SECTION_SOURCES,
+}
+
 
 def _mentioned_file_paths(body: str) -> list[str]:
     """Return file paths explicitly mentioned in Markdown body backticks."""
@@ -58,15 +74,44 @@ def _related_files(meta: dict[str, str]) -> list[str]:
     return [match.group(1) for match in _RELATED_FILE_ITEM.finditer(raw)]
 
 
-def _assert_related_files_are_body_mentions(meta: dict[str, str], body: str) -> None:
-    """`related_files` is a body cross-reference list, not a dependency graph."""
+def _assert_related_files_are_maintained_inner_links(
+    meta: dict[str, str], body: str, *, source_path: str
+) -> list[str]:
+    """`related_files` is the prompt-source crawl graph, not a test list."""
     related = _related_files(meta)
-    assert related == _mentioned_file_paths(body)
+    assert len(related) == len(set(related)), f"duplicate related_files in {source_path}"
+    assert source_path not in related, f"{source_path} must not list itself"
     assert all(not item.startswith("tests/") for item in related)
+    # File paths rendered in the body still need a crawl link, but prompt-source
+    # inner links may be listed even when they are not rendered into the LLM body.
+    assert set(_mentioned_file_paths(body)) <= set(related)
     maintenance = meta.get("maintenance", "")
-    assert "exactly the file paths explicitly mentioned" in maintenance
-    assert "Do not list tests" in maintenance
-    assert "use []" in maintenance
+    for phrase in (
+        "maintained inner links",
+        "crawl the listed files",
+        "reciprocal link",
+        "principle links to each prompt/guidance source",
+        "guidance INDEX links to each guidance section",
+        "Do not list tests",
+    ):
+        assert phrase in maintenance
+    if source_path != _PRINCIPLE_SOURCE:
+        assert _PRINCIPLE_SOURCE in related
+    if source_path == _PRINCIPLE_SOURCE:
+        assert set(_PROMPT_SOURCE_GRAPH - {_PRINCIPLE_SOURCE}) <= set(related)
+    if source_path == _GUIDANCE_INDEX_SOURCE:
+        assert set(_GUIDANCE_SECTION_SOURCES) <= set(related)
+    if source_path in _GUIDANCE_SECTION_SOURCES:
+        assert _GUIDANCE_INDEX_SOURCE in related
+    return related
+
+
+def _prompt_source_path_for_section(name: str) -> str:
+    return f"{_PROMPT_SOURCE}/{name}"
+
+
+def _prompt_source_path_for_guidance(filename: str) -> str:
+    return f"{_PROMPT_SOURCE}/guidance/{filename}"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +164,7 @@ def test_packaged_section_sources_carry_frontmatter(name):
     assert "audience" not in meta
     assert meta.get("summary")
     assert meta.get("why")
-    _assert_related_files_are_body_mentions(meta, body)
+    _assert_related_files_are_maintained_inner_links(meta, body, source_path=_prompt_source_path_for_section(name))
     assert body, "section body must be non-empty"
     # The body must not re-open a frontmatter fence.
     assert not body.startswith("---")
@@ -151,6 +196,9 @@ def test_principle_body_starts_with_system_prompt_map_and_lingtai_principles():
     assert "Act on need" in body
     assert "text output is diary/private scratch" in body
     assert "Always reply on the channel where the message arrived" in body
+    assert "Mechanical runtime facts" in body
+    assert "not the self-authored LingTai/character" in body
+    assert "The self-authored LingTai/灵台 section" in body
     assert "Progressive disclosure principle: each resident prompt layer" in body
     assert "Token efficiency principle:" in body
 
@@ -182,12 +230,12 @@ def test_guidance_catalog_preserves_code_owned_section_order():
     assert ids == list(GUIDANCE_SECTION_ORDER)
 
 
-def test_guidance_index_frontmatter_related_files_match_body_mentions():
+def test_guidance_index_frontmatter_related_files_are_inner_links():
     root = files("lingtai.prompts.guidance")
     meta, body = split_frontmatter(root.joinpath("INDEX.md").read_text(encoding="utf-8"))
     assert meta.get("kind") == "meta-guidance-catalog"
     assert "audience" not in meta
-    _assert_related_files_are_body_mentions(meta, body)
+    _assert_related_files_are_maintained_inner_links(meta, body, source_path=_GUIDANCE_INDEX_SOURCE)
     assert not body.strip()
 
 
@@ -202,9 +250,33 @@ def test_guidance_section_frontmatter_is_documentary_not_behavior_config():
         assert "audience" not in meta
         assert meta.get("summary"), f"{sid} must summarize why this fragment exists"
         assert meta.get("why"), f"{sid} must explain purpose/why"
-        _assert_related_files_are_body_mentions(meta, body)
+        _assert_related_files_are_maintained_inner_links(
+            meta, body, source_path=_prompt_source_path_for_guidance(f"{sid}.md")
+        )
         assert not (forbidden & set(meta)), f"behavior config leaked into frontmatter for {sid}"
         assert body and not body.startswith("---")
+
+
+def test_prompt_related_files_form_bidirectional_inner_link_graph():
+    """Prompt/guidance sources should be crawlable through reciprocal links."""
+    mapping: dict[str, list[str]] = {}
+    for name in _SECTION_FILES:
+        meta, _body = split_frontmatter(
+            files("lingtai.prompts").joinpath(name).read_text(encoding="utf-8")
+        )
+        mapping[_prompt_source_path_for_section(name)] = _related_files(meta)
+
+    root = files("lingtai.prompts.guidance")
+    meta, _body = split_frontmatter(root.joinpath("INDEX.md").read_text(encoding="utf-8"))
+    mapping[_GUIDANCE_INDEX_SOURCE] = _related_files(meta)
+    for sid in GUIDANCE_SECTION_ORDER:
+        meta, _body = split_frontmatter(root.joinpath(f"{sid}.md").read_text(encoding="utf-8"))
+        mapping[_prompt_source_path_for_guidance(f"{sid}.md")] = _related_files(meta)
+
+    for source, related in mapping.items():
+        for target in related:
+            if target in mapping:
+                assert source in mapping[target], f"{source} links to {target}, but not vice versa"
 
 
 def test_build_runtime_guidance_sources_from_catalog():

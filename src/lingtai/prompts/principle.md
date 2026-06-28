@@ -10,11 +10,24 @@ why: >
   This file leads the raw system prompt so the agent sees the map before the territory: which
   section owns what, why the layers exist, and how to route to compact resident sections or
   manuals without duplicating long procedures.
-related_files: []
+related_files:
+  - "src/lingtai/prompts/substrate.md"
+  - "src/lingtai/prompts/procedures.md"
+  - "src/lingtai/prompts/guidance/INDEX.md"
+  - "src/lingtai/prompts/guidance/summarize_best_practice.md"
+  - "src/lingtai/prompts/guidance/summarize_reconstruction_threshold.md"
+  - "src/lingtai/prompts/guidance/token_efficiency.md"
+  - "src/lingtai/prompts/guidance/review_delegation_instruction_check.md"
+  - "src/lingtai/prompts/guidance/notification_handling.md"
 maintenance: >
-  When editing this file, update related_files so it contains exactly the file paths explicitly
-  mentioned in the Markdown body. Do not list tests, loaders, manifests, or other indirect
-  dependencies unless their paths appear in the body; use [] when the body mentions no file paths.
+  When editing this file, treat related_files as maintained inner links for the prompt/guidance
+  source graph. Before changing behavior or prose, crawl the listed files, update any affected
+  reciprocal link on the other side (principle links to each prompt/guidance source; each such
+  source links back to principle; guidance INDEX links to each guidance section and each section
+  links back to INDEX), and keep this list generous enough for future maintainers to find adjacent
+  prompt layers. Do not list tests merely because they validate the contract; add loaders,
+  manifests, or package metadata only when this file actually discusses them or the prompt-source
+  relation needs that link.
 ---
 # LingTai System Prompt Map
 
@@ -33,8 +46,8 @@ The system prompt is a layered operating contract. This opening section names th
 | `mcp` | Optional external-integration catalog: registered MCP services and their ownership/configuration boundaries. |
 | `skills` | Progressive-disclosure catalog of reusable procedures; load the relevant skill only when the task needs it. |
 | `knowledge` | Private durable memory catalog: project facts, decisions, journals, and local context that survive molt. |
-| `identity` | Mechanical runtime identity: name, address, birth, privileges, stamina, model/provider, and message surfaces. |
-| `character` | Durable self-authored identity: specialties, working style, standing relationships, accomplishments, and hard-won rules. |
+| `identity` | Mechanical runtime facts: name, address, birth, privileges, stamina, model/provider, and message surfaces. It is not the self-authored LingTai/character. |
+| `character` | The self-authored LingTai/灵台 section (called `character` in prompt order): specialties, working style, standing relationships, accomplishments, and hard-won rules. |
 | `pad` | Current working state: active tasks, plans, handoffs, and pinned references that should reload across molts. |
 | `meta_guidance` | Resident static rules for interpreting dynamic runtime `_meta` blocks, notifications, token economy, and adapter guidance. |
 

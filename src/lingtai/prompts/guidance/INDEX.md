@@ -16,9 +16,20 @@ why: >
   frontmatter+Markdown file, like the prompt sections and skills. This frontmatter is
   developer-facing metadata; it never renders into the LLM prompt. The derived
   `system/guidance.json` is still emitted for TUI/Portal consumers.
-related_files: []
+related_files:
+  - "src/lingtai/prompts/principle.md"
+  - "src/lingtai/prompts/guidance/summarize_best_practice.md"
+  - "src/lingtai/prompts/guidance/summarize_reconstruction_threshold.md"
+  - "src/lingtai/prompts/guidance/token_efficiency.md"
+  - "src/lingtai/prompts/guidance/review_delegation_instruction_check.md"
+  - "src/lingtai/prompts/guidance/notification_handling.md"
 maintenance: >
-  When editing this file, update related_files so it contains exactly the file paths explicitly
-  mentioned in the Markdown body. Do not list tests, loaders, manifests, or other indirect
-  dependencies unless their paths appear in the body; use [] when the body mentions no file paths.
+  When editing this file, treat related_files as maintained inner links for the prompt/guidance
+  source graph. Before changing behavior or prose, crawl the listed files, update any affected
+  reciprocal link on the other side (principle links to each prompt/guidance source; each such
+  source links back to principle; guidance INDEX links to each guidance section and each section
+  links back to INDEX), and keep this list generous enough for future maintainers to find adjacent
+  prompt layers. Do not list tests merely because they validate the contract; add loaders,
+  manifests, or package metadata only when this file actually discusses them or the prompt-source
+  relation needs that link.
 ---
