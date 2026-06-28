@@ -102,15 +102,16 @@ def test_procedures_file_no_longer_active_optional_prompt_field():
     assert all("procedures_file" not in w for w in warnings)
 
 
-# --- init seed contract: `lingtai` replaces `prompt` with no legacy alias ---
+# --- init seed contract: lingtai is optional; prompt has no alias ---
 #
-# `lingtai` (灵台) is the agent's required initial character seed — distinct from
-# `base_prompt` (third-party injection). It was renamed from `prompt` /
-# `prompt_file`. Jason: no legacy alias, no backward compatibility — a stale
-# `prompt` is an unknown-field warning and a missing `lingtai` is a hard error.
+# The lingtai field is an optional initial character seed distinct from
+# base_prompt (third-party injection). If omitted, the seed is empty and the
+# long-lived character continues to be managed by system/lingtai.md / psyche.
+# Jason: no legacy alias, no backward compatibility — a stale prompt remains
+# an unknown-field warning and is not honored as a character seed.
 
 
-def test_lingtai_is_the_required_seed_field():
+def test_lingtai_is_an_optional_seed_field():
     from lingtai.init_schema import TOP_KNOWN
 
     assert "lingtai" in TOP_KNOWN
@@ -118,47 +119,37 @@ def test_lingtai_is_the_required_seed_field():
 
     data = _valid_init()
     assert data["lingtai"] == ""
-    validate_init(data)  # present → valid
+    validate_init(data)  # present -> valid
 
-
-def test_missing_lingtai_is_a_hard_error():
-    import pytest
-
-    data = _valid_init()
     del data["lingtai"]
-    with pytest.raises(ValueError, match="lingtai"):
-        validate_init(data)
+    warnings = validate_init(data)  # omitted -> empty seed, still valid
+    assert all("lingtai" not in w for w in warnings)
 
 
-def test_lingtai_file_satisfies_the_required_seed():
+def test_lingtai_file_remains_an_optional_seed_field():
     data = _valid_init()
     del data["lingtai"]
     data["lingtai_file"] = "system/lingtai.md"
-    validate_init(data)  # _file form satisfies the requirement
+    validate_init(data)  # _file form remains valid when present
 
 
 def test_legacy_prompt_field_is_unknown_no_alias():
-    """No legacy alias: a `prompt` field is neither known nor honored — it
-    surfaces as an unknown-field warning, and on its own it does NOT satisfy
-    the required `lingtai` seed."""
-    import pytest
+    """No legacy alias: a prompt field is neither known nor honored.
+    It surfaces as an unknown-field warning and does not act as the character
+    seed; missing lingtai is still valid because the seed is optional."""
     from lingtai.init_schema import TOP_KNOWN, TOP_OPTIONAL
 
     assert "prompt" not in TOP_KNOWN
     assert "prompt_file" not in TOP_KNOWN
     assert "prompt" not in TOP_OPTIONAL
 
-    # `prompt` present but `lingtai` absent → required-field failure.
     data = _valid_init()
     del data["lingtai"]
     data["prompt"] = "stale seed under the old name"
-    with pytest.raises(ValueError, match="lingtai"):
-        validate_init(data)
-
-    # With `lingtai` present, a stray `prompt` is merely an unknown-field warning.
-    data["lingtai"] = ""
     warnings = validate_init(data)
+
     assert any("prompt" in w for w in warnings)
+    assert all("lingtai" not in w for w in warnings)
 
 
 # --- init prompt contract: base_prompt is the third-party injection point ---
