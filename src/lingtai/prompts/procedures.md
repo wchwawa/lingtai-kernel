@@ -1,3 +1,18 @@
+---
+name: procedures
+kind: prompt-section
+section: procedures
+audience: developers, coding-agents
+summary: >
+  Kernel-owned resident procedures: operational triggers, checklists, routing
+  steps, reporting discipline, and concrete tool-use rules — how to act.
+  References/manuals carry the why, boundaries, and troubleshooting.
+why: >
+  Self-explains why this fragment exists: the concise resident how-to layer that
+  routes the agent to the canonical rule. This frontmatter is developer-facing
+  metadata only — stripped before the body is rendered into the LLM prompt or
+  system.md.
+---
 ### Operating by Progressive Disclosure
 
 Keep the always-on prompt small. When a procedure needs examples, command
@@ -7,7 +22,7 @@ of relying on resident memory. The unified runtime/procedure router is
 `reference/procedures-manual/SKILL.md`.
 
 High-attention tool-result summarization guidance lives in the runtime
-`guidance.json` prompt resource as resident `meta_guidance`; reference/manual
+guidance catalog as resident `meta_guidance`; reference/manual
 layers explain the rationale, edge cases, examples, and troubleshooting.
 
 **Summarize cadence.** After digesting a completed tool result whose raw text no

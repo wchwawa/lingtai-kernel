@@ -1,3 +1,19 @@
+---
+name: substrate
+kind: prompt-section
+section: substrate
+audience: developers, coding-agents
+summary: >
+  Kernel-owned, cross-app-stable operating model rendered right after `## tools`:
+  tool tiers, data-flow topology, life states, channel discipline, attention
+  model — the operational wisdom spanning multiple tools. Expanded detail is
+  routed to the `system-manual` skill.
+why: >
+  Self-explains why this fragment is resident: tool schemas above it carry
+  mechanical reference, substrate carries the patterns that span tools. This
+  frontmatter is developer-facing metadata only — stripped before the body is
+  rendered into the LLM prompt or system.md.
+---
 # Substrate
 
 This section is kernel-owned and cross-app stable. It holds the minimal operating

@@ -1,3 +1,19 @@
+---
+name: principle
+kind: prompt-section
+section: principle
+audience: developers, coding-agents
+summary: >
+  Kernel-owned top-level progressive-disclosure contract. The single source of
+  truth for how the resident prompt layers (meta_guidance / procedures /
+  substrate / reference manuals) divide responsibility, plus the token-efficiency
+  principle. Rendered raw (no `## ` header) as the first system-prompt section.
+why: >
+  Self-explains why this fragment leads the system prompt: it tells the agent
+  where each canonical rule lives so layers point to one source instead of
+  restating it. This frontmatter is developer-facing metadata only — it is
+  stripped before the body is rendered into the LLM prompt or system.md.
+---
 Progressive disclosure principle: each resident prompt layer has one job and points to the next.
 
 - `meta_guidance` is immediate runtime guidance and routing hooks: tell the agent where the canonical rule lives right now; do not duplicate long procedures here.
