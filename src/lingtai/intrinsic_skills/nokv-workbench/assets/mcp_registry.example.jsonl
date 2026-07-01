@@ -1,0 +1,1 @@
+{"name":"nokv-workbench","summary":"NoKV-controlled workbench artifact namespace.","transport":"stdio","command":"/path/to/nokv","args":["mcp","--profile","workbench","--workbench-root","/workbenches"],"source":"local-nokv"}

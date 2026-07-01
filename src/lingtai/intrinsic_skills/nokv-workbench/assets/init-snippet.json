@@ -1,0 +1,15 @@
+{
+  "mcp": {
+    "nokv-workbench": {
+      "type": "stdio",
+      "command": "/path/to/nokv",
+      "args": [
+        "mcp",
+        "--profile",
+        "workbench",
+        "--workbench-root",
+        "/workbenches"
+      ]
+    }
+  }
+}

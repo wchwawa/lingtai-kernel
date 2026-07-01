@@ -140,6 +140,31 @@ def test_validator_rejects_long_summary():
     assert "summary too long" in err
 
 
+def test_nokv_workbench_registry_example_is_valid():
+    skill_root = Path("src/lingtai/intrinsic_skills/nokv-workbench")
+    registry_path = skill_root / "assets" / "mcp_registry.example.jsonl"
+    init_path = skill_root / "assets" / "init-snippet.json"
+
+    record = json.loads(registry_path.read_text(encoding="utf-8").strip())
+    ok, err = validate_record(record)
+    assert ok, err
+    assert record["name"] == "nokv-workbench"
+    assert record["transport"] == "stdio"
+    assert record["args"] == [
+        "mcp",
+        "--profile",
+        "workbench",
+        "--workbench-root",
+        "/workbenches",
+    ]
+
+    init = json.loads(init_path.read_text(encoding="utf-8"))
+    spec = init["mcp"]["nokv-workbench"]
+    assert spec["type"] == "stdio"
+    assert spec["command"] == record["command"]
+    assert spec["args"] == record["args"]
+
+
 # ---------------------------------------------------------------------------
 # Decompression
 # ---------------------------------------------------------------------------
